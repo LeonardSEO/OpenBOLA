@@ -56,6 +56,30 @@ def test_state_database_and_sidecars_are_private(tmp_path: Path) -> None:
         assert sidecar.stat().st_mode & 0o777 == 0o600
 
 
+def test_sticky_shared_ancestor_allows_private_owned_database_parent(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o700)
+    os.chmod(shared, 0o1777)  # noqa: S103 - models the standard /tmp trust boundary
+    private = shared / "engagement"
+    private.mkdir(mode=0o700)
+
+    db_path = private / "state.db"
+    StateStore(db_path)
+
+    assert db_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_non_sticky_writable_ancestor_is_rejected(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o700)
+    os.chmod(shared, 0o777)  # noqa: S103 - deliberately unsafe regression fixture
+    private = shared / "engagement"
+    private.mkdir(mode=0o700)
+
+    with pytest.raises(RuntimeError, match="group/world writable"):
+        StateStore(private / "state.db")
+
+
 def test_existing_database_is_hardened_and_symlinks_are_rejected(tmp_path: Path) -> None:
     db_path = tmp_path / "existing.db"
     connection = sqlite3.connect(db_path)

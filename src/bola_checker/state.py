@@ -603,7 +603,11 @@ class StateStore:
         if not stat.S_ISDIR(metadata.st_mode):
             raise RuntimeError("state database parent must be a regular directory")
         if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            raise RuntimeError("state database parent must not be group/world writable")
+            sticky = bool(metadata.st_mode & stat.S_ISVTX)
+            uid = cls._current_uid()
+            trusted_sticky_owner = uid is None or metadata.st_uid in {0, uid}
+            if leaf or not sticky or not trusted_sticky_owner:
+                raise RuntimeError("state database parent must not be group/world writable")
         uid = cls._current_uid()
         if leaf and uid is not None and metadata.st_uid != uid:
             raise RuntimeError("state database parent must be owned by the current user")
