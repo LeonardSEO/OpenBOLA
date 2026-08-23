@@ -1,0 +1,49 @@
+# Authorization scope for BOLACheck. Keep the real authorization reference
+# outside source control if it contains sensitive client or contract details.
+# The confirmed file itself must be a regular, non-symlink file and must remain
+# unchanged after loading; BOLACheck binds the reviewed bytes to every guard.
+client_name: "Example B.V."
+authorization_reference: "Signed testing agreement PT-2026-014"
+confirmed: false # Change only after written authorization has been verified.
+
+# UTC timestamps are mandatory. The scope is invalid before starts_at and at
+# or after expires_at.
+starts_at: "2026-08-23T09:00:00Z"
+expires_at: "2026-08-23T17:00:00Z"
+
+# Entries are exact hostnames or a leftmost wildcard. *.example.test matches
+# api.example.test but never the bare example.test.
+allowed_hosts:
+  - "api.example.test"
+  - "*.staging.example.test"
+
+# Optional. If this is non-empty, hostname targets require an injected resolver
+# and every returned address must be in one of these networks.
+allowed_cidrs:
+  - "192.0.2.0/24"
+
+# Every rule is explicit. Glob and regex rules are evaluated against the URL
+# path only; `*` stays in one path segment and only `**` is recursive. Regex
+# rules must be anchored and use the restricted safe subset.
+allowed_paths:
+  - "glob:/v1/projects/*"
+  - "regex:^/health/[0-9]+$"
+
+# Optional; omitted means GET, HEAD, and OPTIONS.
+read_methods:
+  - "GET"
+  - "HEAD"
+  - "OPTIONS"
+
+# Optional. Mutating methods require a separate grant with both exact methods
+# and explicit path rules.
+mutation_grants:
+  - methods:
+      - "POST"
+    path_patterns:
+      - "glob:/v1/reports"
+
+# The executor must submit the exact ScopeDecision.canonical_url, and, when a
+# decision has connect_ips, pin its connection to one of those addresses and
+# validate the actual peer address after connecting. Validate every redirect
+# target by obtaining a new ScopeDecision; never reuse a prior decision.
