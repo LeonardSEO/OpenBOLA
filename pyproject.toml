@@ -54,6 +54,9 @@ bolacheck = "bola_checker.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/bola_checker"]
 
+[tool.hatch.build.targets.sdist]
+exclude = ["bola-tool-plan.md"]
+
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --strict-config"
 testpaths = ["tests"]
@@ -70,4 +73,3 @@ ignore = ["S101"]
 python_version = "3.11"
 strict = true
 packages = ["bola_checker"]
-

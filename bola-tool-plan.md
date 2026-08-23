@@ -1,8 +1,17 @@
-# BOLA/IDOR testtool — volledig bouwplan
+# BOLA/IDOR testtool — historisch bouwplan
 
-Open source, AI-minimaal, Codex- en API-compatibel (o.a. DeepSeek). Doel: beter dan BOLABuster (Palo Alto Unit 42), maar wel daadwerkelijk open source en zonder verplichte OpenAPI-spec vooraf.
+> **Historisch en niet-authoritatief.** Dit bestand is het oorspronkelijke
+> ontwerpdocument waarop de huidige implementatie is gebaseerd. De prototypes,
+> commando's, schemas en codefragmenten hieronder zijn niet de huidige
+> productiecode, zijn niet bedoeld om uit te voeren of te kopieren, en kunnen
+> inmiddels onveilige of verouderde keuzes tonen. De code onder `src/`,
+> `AUTHORIZATION.md`, `docs/architecture.md` en de actuele README zijn leidend.
+> Dit bestand wordt bewust niet opgenomen in wheel- of sdist-artifacts.
 
-Elke module in dit document is geschreven en getest: unit-tests per laag plus een volledige end-to-end run tegen een lokale mock-API die een echte BOLA-kwetsbaarheid simuleert. De pipeline vindt die kwetsbaarheid en genereert er correct rapport over. Alle code hieronder is exact wat getest is, geen placeholders.
+Het oorspronkelijke doel was een open-source, AI-minimale en API-compatibele
+BOLA/IDOR-validator zonder verplichte OpenAPI-specificatie vooraf. De huidige
+implementatie wijkt op belangrijke veiligheidsgrenzen af van de prototypes
+hieronder.
 
 ## Kernprincipe
 
