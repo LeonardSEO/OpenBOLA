@@ -33,6 +33,16 @@ class Verdict(StrEnum):
     SKIPPED = "skipped"
 
 
+class AuditEventType(StrEnum):
+    """Closed audit event names accepted by persistent state."""
+
+    RUN_STARTED = "run_started"
+    OWNERSHIP_IMPORTED = "ownership_imported"
+    OWNERSHIP_EVIDENCE_PERSISTED = "ownership_evidence_persisted"
+    PROBE_ATTEMPT_RECORDED = "probe_attempt_recorded"
+    LEGACY_EVENT_REDACTED = "legacy_event_redacted"
+
+
 @dataclass(frozen=True)
 class CredentialRef:
     """Reference to a credential held outside persistent state."""
@@ -63,6 +73,17 @@ class OwnershipEvidence:
     object_id: str
     confidence: OwnershipConfidence
     source: str
+
+
+class OwnershipConflictError(ValueError):
+    """Raised when strong evidence would assign one object to two identities."""
+
+    def __init__(
+        self, candidate: OwnershipEvidence, existing: tuple[OwnershipEvidence, ...]
+    ) -> None:
+        self.candidate = candidate
+        self.existing = existing
+        super().__init__("strong ownership evidence conflicts with persisted ownership")
 
 
 @dataclass(frozen=True)
