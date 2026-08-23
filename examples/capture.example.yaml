@@ -1,0 +1,17 @@
+# The target is validated but not navigated by BOLACheck. In an interactive
+# capture, navigate there manually after the blank browser window opens.
+target_url: https://api.example.test
+# This directory must already exist and must not be a symlink. Missing
+# directories in output_path are created below this anchored root without
+# following symlinks; the final HAR is atomically installed with mode 0600.
+capture_root: ./captures
+output_path: alice.har
+identity: alice
+
+# Keep this true for programmatic callers. Set both values as shown below for a
+# visible, operator-controlled login window.
+headless: true
+interactive_login: false
+
+# Reject unexpectedly large HAR imports before parsing them.
+max_har_bytes: 26214400
