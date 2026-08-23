@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import re
@@ -422,7 +423,7 @@ class LiteLLMAdapter:
     def propose_tests(self, context: Mapping[str, Any]) -> TestPlan:
         sanitized_context = sanitize_context(context)
         try:
-            import litellm  # type: ignore[import-not-found]
+            litellm = importlib.import_module("litellm")
         except ImportError as error:
             raise RuntimeError("LiteLLM support requires installing bolacheck[ai]") from error
         response = litellm.completion(
