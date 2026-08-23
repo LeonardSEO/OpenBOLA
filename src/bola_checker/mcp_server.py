@@ -16,11 +16,16 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
+import os
 import re
-from collections.abc import Callable, Iterable, Sequence
+import sqlite3
+import stat
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Annotated, Any, Literal, Protocol, cast
+from typing import Annotated, Any, Literal, NoReturn, Protocol, cast
+from urllib.parse import urlsplit
 
 from pydantic import Field
 
@@ -30,12 +35,16 @@ from bola_checker.endpoints import (
     build_test_targets,
     correlate_ownership,
     discover_endpoint_candidates,
+    extract_object_ids,
     templatize,
 )
+from bola_checker.executor import ProbeExecutor
 from bola_checker.models import (
     CredentialKind,
+    CredentialRef,
     ProbeMode,
     ProbeResult,
+    ProbeTarget,
     RequestRecord,
 )
 from bola_checker.reporting import ReportBundle, write_reports
@@ -45,6 +54,10 @@ from bola_checker.state import PendingCombination, StateStore, object_ref_finger
 MAX_PATH_LENGTH = 4096
 MAX_IDENTITY_LENGTH = 128
 MAX_RECORDS = 10_000
+MAX_OWNERSHIP_FILE_BYTES = 5 * 1024 * 1024
+MAX_JSON_DEPTH = 32
+MAX_JSON_NODES = 4_096
+MAX_JSON_STRING = 16 * 1024
 MAX_PLAN_ITEMS = 500
 MAX_ENV_NAME_LENGTH = 128
 _SAFE_IDENTIFIER = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
@@ -95,12 +108,16 @@ class MCPSession:
     scope_path: Path | None = None
     state_store: StateStore | None = None
     credential_vault: CredentialVault = field(default_factory=CredentialVault)
+    credential_refs: dict[str, CredentialRef] = field(default_factory=dict, repr=False)
     records: list[RequestRecord] = field(default_factory=list)
+    ownership_entries: list[Mapping[str, Any]] = field(default_factory=list, repr=False)
     identity_hints: dict[str, str] = field(default_factory=dict)
     # State may persist opaque object references.  Keep a process-local map so
     # an injected executor can reconstruct the concrete ID from current,
     # already-sanitized traffic without putting it in MCP output or SQLite.
     object_ids: dict[tuple[str, str, str], str] = field(default_factory=dict, repr=False)
+    object_origins: dict[tuple[str, str, str], set[str]] = field(default_factory=dict, repr=False)
+    origins: set[str] = field(default_factory=set, repr=False)
     outcomes: list[ProbeResult] = field(default_factory=list)
     last_base_url: str | None = None
 
@@ -147,6 +164,213 @@ def _safe_kind(value: object) -> CredentialKind:
         raise MCPServiceError("credential kind is invalid") from error
 
 
+def _origin(url: str) -> str:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        raise MCPServiceError("record URL has no valid HTTP origin")
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise MCPServiceError("record URL has an invalid port") from error
+    effective_port = port or (443 if parsed.scheme == "https" else 80)
+    return f"{parsed.scheme}://{parsed.hostname.casefold()}:{effective_port}"
+
+
+def _read_ownership_entries(path: Path, guard: ScopeGuard) -> list[Mapping[str, Any]]:
+    raw = _read_bounded_regular_file(path)
+    try:
+        document = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_json_constants,
+        )
+        _validate_json_shape(document)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
+        raise MCPServiceError("ownership records are not unambiguous JSON") from error
+    if not isinstance(document, list) or len(document) > MAX_RECORDS:
+        raise MCPServiceError("ownership records must be a bounded JSON list")
+    entries: list[Mapping[str, Any]] = []
+    for item in document:
+        if not isinstance(item, Mapping) or set(item) != {
+            "url",
+            "method",
+            "identity",
+            "explicit_ownership",
+        }:
+            raise MCPServiceError("ownership record fields are not allowlisted")
+        url = _bounded_text(item["url"], "record URL", max_length=MAX_PATH_LENGTH)
+        method = _bounded_text(item["method"], "record method", max_length=16).upper()
+        identity = _safe_identity(item["identity"])
+        ownership = item["explicit_ownership"]
+        if not isinstance(ownership, Mapping) or not ownership:
+            raise MCPServiceError("explicit ownership must be a non-empty mapping")
+        safe_ownership: dict[str, str] = {}
+        for object_id, owner in ownership.items():
+            object_value = _bounded_text(object_id, "object identifier", max_length=4096)
+            safe_ownership[object_value] = _safe_identity(owner)
+        guard.require_allowed(url, method)
+        entries.append(
+            {
+                "url": url,
+                "method": method,
+                "identity": identity,
+                "explicit_ownership": safe_ownership,
+            }
+        )
+    return entries
+
+
+def _read_bounded_regular_file(path: Path) -> bytes:
+    """Read a bounded regular file without following a replaced leaf symlink."""
+
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise MCPServiceError("ownership records cannot be opened safely")
+    flags = os.O_RDONLY | nofollow
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise MCPServiceError("ownership records must be a regular file") from error
+    try:
+        try:
+            initial = os.fstat(descriptor)
+            if not stat.S_ISREG(initial.st_mode):
+                raise MCPServiceError("ownership records must be a regular file")
+            if initial.st_size > MAX_OWNERSHIP_FILE_BYTES:
+                raise MCPServiceError("ownership records exceed the size limit")
+            chunks: list[bytes] = []
+            total = 0
+            while total <= MAX_OWNERSHIP_FILE_BYTES:
+                chunk = os.read(descriptor, min(64 * 1024, MAX_OWNERSHIP_FILE_BYTES + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > MAX_OWNERSHIP_FILE_BYTES:
+                    raise MCPServiceError("ownership records exceed the size limit")
+            final = os.fstat(descriptor)
+            if final.st_size != initial.st_size or total != initial.st_size:
+                raise MCPServiceError("ownership records changed while being read")
+            return b"".join(chunks)
+        except OSError as error:
+            raise MCPServiceError("ownership records cannot be read") from error
+    finally:
+        os.close(descriptor)
+
+
+def _validate_json_shape(
+    value: Any, *, depth: int = 0, nodes: list[int] | None = None
+) -> None:
+    """Apply the same depth/node/string bounds as pipeline record imports."""
+
+    if nodes is None:
+        nodes = [0]
+    nodes[0] += 1
+    if nodes[0] > MAX_JSON_NODES or depth > MAX_JSON_DEPTH:
+        raise ValueError("ownership records exceed structural limits")
+    if isinstance(value, Mapping):
+        if len(value) > MAX_JSON_NODES:
+            raise ValueError("ownership record mapping exceeds structural limits")
+        for key, child in value.items():
+            if not isinstance(key, str) or len(key) > MAX_JSON_STRING:
+                raise ValueError("ownership record key exceeds structural limits")
+            _validate_json_shape(child, depth=depth + 1, nodes=nodes)
+    elif isinstance(value, list):
+        if len(value) > MAX_JSON_NODES:
+            raise ValueError("ownership record list exceeds structural limits")
+        for child in value:
+            _validate_json_shape(child, depth=depth + 1, nodes=nodes)
+    elif isinstance(value, str) and len(value) > MAX_JSON_STRING:
+        raise ValueError("ownership record value exceeds structural limits")
+
+
+def _reject_json_constants(value: str) -> NoReturn:
+    raise ValueError(f"unsupported JSON constant: {value}")
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _require_new_state_path(path: Path) -> None:
+    """Require a fresh database below an existing, real directory."""
+
+    if path.exists() or path.is_symlink():
+        raise MCPServiceError("db_path must point to a non-existing state database")
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(f"{path}{suffix}")
+        if sidecar.exists() or sidecar.is_symlink():
+            raise MCPServiceError("db_path has an existing SQLite sidecar")
+    parent = path.parent
+    if not parent.exists() or parent.is_symlink() or not parent.is_dir():
+        raise MCPServiceError("db_path parent must be an existing non-symlink directory")
+    current = Path(parent.anchor)
+    for component in parent.parts[1:]:
+        current /= component
+        if current.is_symlink() or not current.is_dir():
+            raise MCPServiceError("db_path parent must be an existing non-symlink directory")
+
+
+@dataclass
+class _DefaultPendingExecutor:
+    """Read-only adapter from pending state rows to the phase-5 executor."""
+
+    probe_executor: ProbeExecutor
+    state_store: StateStore
+    credential_refs: Mapping[str, CredentialRef]
+
+    def run_pending(
+        self,
+        pending: Sequence[PendingCombination],
+        *,
+        base_url: str,
+        scope_guard: ScopeGuard,
+        state_store: StateStore,
+        credential_vault: CredentialVault,
+        run_id: int,
+        mode: ProbeMode,
+    ) -> Sequence[ProbeResult]:
+        del scope_guard, state_store, credential_vault, run_id
+        if mode is not ProbeMode.READ:
+            raise MCPServiceError("MCP execution is read-only; mutation probes are unavailable")
+        endpoints = {item["id"]: item for item in self.state_store.list_endpoints()}
+        identities = {item["id"]: item for item in self.state_store.list_identities()}
+        results: list[ProbeResult] = []
+        for combination in pending:
+            endpoint = endpoints.get(combination.endpoint_id)
+            owner = identities.get(combination.owner_identity_id)
+            attacker = identities.get(combination.attacker_identity_id)
+            if endpoint is None or owner is None or attacker is None:
+                raise MCPServiceError("pending state references are incomplete")
+            owner_name = str(owner["name"])
+            attacker_name = str(attacker["name"])
+            owner_ref = self.credential_refs.get(owner_name)
+            attacker_ref = self.credential_refs.get(attacker_name)
+            if owner_ref is None or attacker_ref is None:
+                raise MCPServiceError("pending identity has no current environment credential")
+            method = str(endpoint["method"])
+            if method not in {"GET", "HEAD", "OPTIONS"}:
+                raise MCPServiceError("MCP execution is read-only; endpoint method is not safe")
+            target = ProbeTarget(
+                base_url=base_url,
+                endpoint_template=str(endpoint["template"]),
+                method=method,
+                object_id=_pending_object(combination),
+                owner_identity=owner_name,
+                attacker_identity=attacker_name,
+                owner_credential=owner_ref,
+                attacker_credential=attacker_ref,
+                mode=ProbeMode.READ,
+            )
+            results.append(self.probe_executor.run(target))
+        return tuple(results)
+
+
 def _safe_result(result: ProbeResult) -> dict[str, Any]:
     """Return structural outcome metadata without identifiers or bodies."""
 
@@ -185,6 +409,12 @@ def _safe_result_endpoint(value: str) -> str:
     return canonical
 
 
+def _is_executable_path_template(template: str) -> bool:
+    """Only one path placeholder is safe for the phase-5 path target API."""
+
+    return template.count("{id}") == 1 and "{id2}" not in template and "{id3}" not in template
+
+
 class MCPService:
     """Pure service handlers backing both tests and the optional MCP server."""
 
@@ -193,9 +423,11 @@ class MCPService:
         session: MCPSession | None = None,
         *,
         executor: PendingExecutor | ExecutorCallable | None = None,
+        transport: Any | None = None,
     ) -> None:
         self.session = session or MCPSession()
         self.executor = executor
+        self.transport = transport
 
     def _require_ready(self) -> tuple[ScopeGuard, StateStore]:
         guard = self.session.scope_guard
@@ -210,12 +442,17 @@ class MCPService:
         """Drop all engagement-derived data before a scope/state transition."""
 
         self.session.records.clear()
+        self.session.ownership_entries.clear()
         self.session.identity_hints.clear()
         self.session.object_ids.clear()
+        self.session.object_origins.clear()
+        self.session.origins.clear()
         self.session.outcomes.clear()
         self.session.last_base_url = None
         self.session.credential_vault = CredentialVault()
+        self.session.credential_refs.clear()
         self.executor = None
+        self.transport = None
 
     def load_scope(self, scope_path: str | Path) -> dict[str, Any]:
         """Load a real, provenance-marked scope file; failures clear the session."""
@@ -250,12 +487,23 @@ class MCPService:
         self.session.state_store = None
         try:
             path = _safe_path(db_path, "db_path")
+            _require_new_state_path(path)
         except MCPServiceError as error:
             return {"ok": False, "error": "state_unavailable", "message": str(error)}
         try:
             store = StateStore(path)
-        except (OSError, ValueError, RuntimeError) as error:
-            return {"ok": False, "error": "state_unavailable", "message": str(error)}
+        except sqlite3.Error:
+            return {
+                "ok": False,
+                "error": "state_unavailable",
+                "message": "state database unavailable",
+            }
+        except (OSError, ValueError, RuntimeError):
+            return {
+                "ok": False,
+                "error": "state_unavailable",
+                "message": "state initialization failed",
+            }
         self.session.state_store = store
         return {"ok": True, "schema_version": store.schema_version()}
 
@@ -275,6 +523,7 @@ class MCPService:
             name=name_value,
             variable=variable,
         )
+        self.session.credential_refs[identity_value] = reference
         store.add_identity(identity_value, credential=reference)
         return {
             "ok": True,
@@ -303,14 +552,22 @@ class MCPService:
         if len(self.session.records) > MAX_RECORDS:
             self.session.records = self.session.records[:MAX_RECORDS]
         store.add_identity(identity_value)
-        for candidate in discover_endpoint_candidates(records):
-            self.session.object_ids[
-                (
+        record_origins = {_origin(record.url) for record in records}
+        self.session.origins.update(record_origins)
+        for record in records:
+            for candidate in discover_endpoint_candidates([record]):
+                if (
+                    candidate.location.value != "path"
+                    or not _is_executable_path_template(candidate.endpoint_template)
+                ):
+                    continue
+                key = (
                     candidate.endpoint_template,
                     candidate.method,
                     object_ref_fingerprint(candidate.object_id),
                 )
-            ] = candidate.object_id
+                self.session.object_ids[key] = candidate.object_id
+                self.session.object_origins.setdefault(key, set()).add(_origin(record.url))
         return {
             "ok": True,
             "identity": identity_value,
@@ -323,12 +580,43 @@ class MCPService:
             "body_secret_warnings": 0,
         }
 
+    def import_records(self, records_path: str | Path) -> dict[str, Any]:
+        """Import bounded explicit-ownership records without accepting secrets."""
+
+        guard, store = self._require_ready()
+        entries = _read_ownership_entries(_safe_path(records_path, "records_path"), guard)
+        self.session.ownership_entries.extend(entries)
+        for entry in entries:
+            url = str(entry["url"])
+            origin = _origin(url)
+            self.session.origins.add(origin)
+            template = templatize(urlsplit(url).path)
+            method = str(entry["method"])
+            ownership = entry["explicit_ownership"]
+            assert isinstance(ownership, Mapping)
+            path_ids = set(extract_object_ids(urlsplit(url).path))
+            if _is_executable_path_template(template):
+                for object_id in ownership:
+                    if str(object_id) not in path_ids:
+                        continue
+                    key = (template, method, object_ref_fingerprint(str(object_id)))
+                    self.session.object_ids[key] = str(object_id)
+                    self.session.object_origins.setdefault(key, set()).add(origin)
+            store.add_identity(str(entry["identity"]))
+        return {"ok": True, "records_imported": len(entries), "ownership_records": len(entries)}
+
     def plan_endpoints(self) -> dict[str, Any]:
         """Discover candidates and persist only strong, unambiguous ownership."""
 
         _guard, store = self._require_ready()
-        candidates = discover_endpoint_candidates(self.session.records)
-        correlations = correlate_ownership(self.session.records, self.session.identity_hints)
+        discovery_entries: list[RequestRecord | Mapping[str, Any]] = [*self.session.records]
+        discovery_entries.extend(self.session.ownership_entries)
+        candidates = discover_endpoint_candidates(discovery_entries)
+        correlations = [
+            evidence
+            for evidence in correlate_ownership(discovery_entries, self.session.identity_hints)
+            if _is_executable_path_template(evidence.endpoint_template)
+        ]
         persisted = build_test_targets(store, correlations)
         # Object identifiers are intentionally not returned by an MCP tool.
         structural_candidates = [
@@ -383,9 +671,7 @@ class MCPService:
         """Run pending tests through an injected executor after a fresh scope check."""
 
         guard, store = self._require_ready()
-        active_executor = executor or self.executor
-        if active_executor is None:
-            raise MCPServiceError("run_pending_tests requires an injected executor")
+        active_executor = executor if executor is not None else self.executor
         base = _bounded_text(base_url, "base_url", max_length=MAX_PATH_LENGTH)
         try:
             probe_mode = mode if isinstance(mode, ProbeMode) else ProbeMode(str(mode).casefold())
@@ -400,6 +686,7 @@ class MCPService:
             return {"ok": False, "error": "scope_denied", "message": str(error)}
 
         pending = tuple(store.untested_combinations())
+        base_origin = _origin(base)
         endpoint_by_id = {item["id"]: item for item in store.list_endpoints()}
         executor_pending_list: list[PendingCombination] = []
         for combination in pending:
@@ -417,12 +704,34 @@ class MCPService:
                         "pending object reference has no current in-memory concrete mapping"
                     )
                 concrete_object = object_reference
+            evidence_origins = self.session.object_origins.get(
+                (
+                    str(endpoint_by_id.get(combination.endpoint_id, {}).get("template", "")),
+                    str(endpoint_by_id.get(combination.endpoint_id, {}).get("method", "")),
+                    object_reference,
+                ),
+                set(),
+            )
+            if evidence_origins != {base_origin}:
+                raise MCPServiceError("pending evidence is not bound to the requested origin")
             executor_pending_list.append(_replace_pending_object(combination, concrete_object))
+        if not self.session.origins or base_origin not in self.session.origins:
+            raise MCPServiceError("base URL origin is not bound to imported evidence")
         executor_pending = tuple(executor_pending_list)
         # State's persistent metadata schema is intentionally narrow.  The
         # mode and count stay in the returned, non-secret handler result rather
         # than widening the audit JSON allowlist from this adapter.
         run_id = store.start_run("mcp-run")
+        if active_executor is None:
+            active_executor = _DefaultPendingExecutor(
+                probe_executor=ProbeExecutor(
+                    guard,
+                    self.session.credential_vault,
+                    transport=self.transport,
+                ),
+                state_store=store,
+                credential_refs=self.session.credential_refs,
+            )
         results = _invoke_executor(
             active_executor,
             executor_pending,
@@ -549,6 +858,10 @@ def create_mcp_server(
     @server.tool  # type: ignore[untyped-decorator]
     def import_har(har_path: MCPPath, identity: MCPIdentity) -> dict[str, Any]:
         return active.import_har(har_path, identity)
+
+    @server.tool  # type: ignore[untyped-decorator]
+    def import_records(records_path: MCPPath) -> dict[str, Any]:
+        return active.import_records(records_path)
 
     @server.tool  # type: ignore[untyped-decorator]
     def plan_endpoints() -> dict[str, Any]:

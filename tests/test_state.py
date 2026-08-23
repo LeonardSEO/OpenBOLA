@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -41,6 +43,48 @@ def _credential(identity: str) -> CredentialRef:
         name="Authorization",
         secret_ref=f"keyring:bola/{identity}",
     )
+
+
+def test_state_database_and_sidecars_are_private(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    store = StateStore(db_path)
+    store.add_identity("alice")
+    assert db_path.stat().st_mode & 0o777 == 0o600
+
+    sidecar = Path(f"{db_path}-shm")
+    if sidecar.exists():
+        assert sidecar.stat().st_mode & 0o777 == 0o600
+
+
+def test_existing_database_is_hardened_and_symlinks_are_rejected(tmp_path: Path) -> None:
+    db_path = tmp_path / "existing.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("CREATE TABLE marker (value TEXT)")
+    connection.commit()
+    connection.close()
+    os.chmod(db_path, 0o444)
+
+    StateStore(db_path)
+    assert db_path.stat().st_mode & 0o777 == 0o600
+
+    target = tmp_path / "target.db"
+    target.write_bytes(b"not-a-state-db")
+    symlink = tmp_path / "symlink.db"
+    symlink.symlink_to(target)
+    with pytest.raises(RuntimeError, match="regular file|safe"):
+        StateStore(symlink)
+
+
+def test_database_leaf_replacement_is_detected_before_next_connection(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    store = StateStore(db_path)
+    replacement = tmp_path / "replacement.db"
+    replacement.write_bytes(b"replacement")
+    db_path.unlink()
+    db_path.symlink_to(replacement)
+
+    with pytest.raises(RuntimeError, match="path changed|safe|regular"):
+        store.list_endpoints()
 
 
 def _target() -> ProbeTarget:
@@ -714,6 +758,82 @@ def test_v2_to_v3_migration_scrubs_object_and_endpoint_secret_bytes(tmp_path: Pa
     for path in (db_path, tmp_path / "state.db-wal", tmp_path / "state.db-shm"):
         if path.exists():
             assert secret.encode() not in path.read_bytes()
+
+
+def test_v2_to_v3_archives_every_legacy_finding_and_coalesces_current_rows(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = StateStore(db_path)
+    secret = "sk_live_LegacyFindingArchiveSentinel_A1b2C3d4E5f6"  # noqa: S105
+    timestamp = "2026-08-24T00:00:00+00:00"
+
+    with store._connection() as connection:
+        connection.execute(
+            "ALTER TABLE ownership_evidence RENAME COLUMN object_ref TO object_id"
+        )
+        connection.execute(
+            "ALTER TABLE tested_combinations RENAME COLUMN object_ref TO object_id"
+        )
+        connection.execute("DELETE FROM schema_migrations WHERE version = 3")
+        connection.execute("UPDATE schema_version SET version = 2 WHERE singleton = 1")
+        endpoint_id = connection.execute(
+            "INSERT INTO endpoints(template, method, first_seen_at) VALUES (?, 'GET', ?)",
+            (f"/documents/{secret}", timestamp),
+        ).lastrowid
+        assert endpoint_id is not None
+        legacy_evidence = f'{{"object_id":"{secret}","attacker_status":200}}'
+        for title, evidence_hash in (
+            ("legacy-one", "legacy-hash-1"),
+            ("legacy-two", "legacy-hash-2"),
+        ):
+            connection.execute(
+                "INSERT INTO findings("
+                "endpoint_id, severity, title, description, evidence_json, evidence_hash, found_at"
+                ") VALUES (?, 'high', ?, ?, ?, ?, ?)",
+                (endpoint_id, title, title, legacy_evidence, evidence_hash, timestamp),
+            )
+
+    migrated = StateStore(db_path)
+    object_ref = object_ref_fingerprint(secret)
+    assert len(migrated.list_findings()) == 1
+
+    with migrated._connection() as connection:
+        archive = connection.execute(
+            "SELECT legacy_finding_id, legacy_object_ref, canonical_title, evidence_json, "
+            "migration_marker FROM legacy_finding_events ORDER BY legacy_finding_id"
+        ).fetchall()
+        assert len(archive) == 2
+        assert [str(row[1]) for row in archive] == [object_ref, object_ref]
+        assert all(str(row[4]) == "v3_findings_archive" for row in archive)
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE legacy_finding_events SET canonical_title = 'changed' WHERE id = 1"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("DELETE FROM legacy_finding_events WHERE id = 1")
+
+        migration_events = connection.execute(
+            "SELECT data_json FROM audit_events WHERE event_type = ?",
+            (AuditEventType.LEGACY_EVENT_REDACTED.value,),
+        ).fetchall()
+        assert len(migration_events) == 1
+        assert json.loads(str(migration_events[0][0])) == {
+            "coalesced_count": 1,
+            "migration_marker": "v3_findings_archive",
+            "preserved_count": 2,
+        }
+
+    for path in (db_path, tmp_path / "state.db-wal", tmp_path / "state.db-shm"):
+        if path.exists():
+            assert secret.encode() not in path.read_bytes()
+
+    StateStore(db_path)
+    with migrated._connection() as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM legacy_finding_events").fetchone()[0]
+            == 2
+        )
 
 
 def test_v2_to_v3_migration_fails_unchanged_with_active_reader_then_retries(

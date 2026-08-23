@@ -78,9 +78,16 @@ def test_import_sanitizes_and_bounds(tmp_path: Path) -> None:
                         "url": f"https://e.test/x?keep=1&token={secret}",
                         "headers": [
                             {"name": "Authorization", "value": secret},
+                            {"name": "X-Auth", "value": "custom-auth-sentinel"},
+                            {"name": "X-Session", "value": "custom-session-sentinel"},
                             {"name": "Content-Type", "value": "application/json"},
                         ],
-                        "postData": {"text": '{"id":"1","password":"x"}'},
+                        "postData": {
+                            "text": (
+                                '{"id":"1","auth":"json-auth-sentinel",'
+                                '"session":"json-session-sentinel","neutral":"json-value-sentinel"}'
+                            )
+                        },
                     },
                     "response": {
                         "status": 200,
@@ -105,12 +112,35 @@ def test_import_sanitizes_and_bounds(tmp_path: Path) -> None:
     path.write_text(json.dumps(doc))
     [record] = parse_har_records(path, "alice")
     assert (
-        record.url.endswith("keep=1&token=%5BREDACTED%5D")
+        record.url.endswith("keep=%5BREDACTED%5D&token=%5BREDACTED%5D")
         and record.headers["Authorization"] == "[REDACTED]"
     )
-    assert record.body == b'{"id":"1","password":"[REDACTED]"}' and record.response_body is None
-    assert "token=%5BREDACTED%5D" in record.response_headers["Link"]
-    assert "code=%5BREDACTED%5D" in record.response_headers["Refresh"]
+    assert record.headers["X-Auth"] == "[REDACTED]"
+    assert record.headers["X-Session"] == "[REDACTED]"
+    assert record.body == (
+        b'{"id":"[REDACTED]","auth":"[REDACTED]","session":"[REDACTED]",'
+        b'"neutral":"[REDACTED]"}'
+    )
+    assert record.response_body is None
+    assert record.response_headers["Link"] == "[REDACTED]"
+    assert record.response_headers["Refresh"] == "[REDACTED]"
+    assert all(
+        marker not in repr(record)
+        and marker not in json.dumps(
+            {
+                "url": record.url,
+                "headers": record.headers,
+                "body": record.body.decode() if record.body else None,
+            }
+        )
+        for marker in (
+            "custom-auth-sentinel",
+            "custom-session-sentinel",
+            "json-auth-sentinel",
+            "json-session-sentinel",
+            "json-value-sentinel",
+        )
+    )
     assert secret not in repr(record)
     path.write_bytes(b"{" + b" " * 20 + b"}")
     with pytest.raises(CaptureError):
@@ -151,12 +181,12 @@ def test_default_collector_captures_sanitized_body_and_response_metadata() -> No
     [entry] = asyncio.run(collector.entries())
     assert entry["request"]["url"].endswith("token=%5BREDACTED%5D")
     assert entry["request"]["headers"] == [
-        {"name": "Content-Type", "value": "application/json; charset=utf-8"},
+        {"name": "Content-Type", "value": "application/json"},
         {"name": "Authorization", "value": "[REDACTED]"},
     ]
     assert entry["request"]["postData"] == {
-        "mimeType": "application/json; charset=utf-8",
-        "text": '{"id":"1","password":"[REDACTED]"}',
+        "mimeType": "application/json",
+        "text": '{"id":"[REDACTED]","password":"[REDACTED]"}',
     }
     assert entry["response"] == {
         "status": 201,
@@ -198,6 +228,34 @@ def test_default_collector_assigns_safe_post_data_mime_fallbacks(
     }
 
 
+def test_default_collector_bounds_entries_during_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bola_checker import capture
+
+    callbacks: dict[str, Any] = {}
+    context = SimpleNamespace(on=lambda event, callback: callbacks.__setitem__(event, callback))
+    collector = capture.InMemoryEventCollector()
+    collector.attach(context)
+    monkeypatch.setattr(capture, "_MAX_CAPTURE_ENTRIES", 2)
+    requests = [
+        SimpleNamespace(
+            method="GET",
+            url=f"https://api.example.test/v1/items/{index}",
+            headers={},
+            post_data=None,
+        )
+        for index in range(3)
+    ]
+
+    for request in requests:
+        callbacks["request"](request)
+
+    assert len(collector._entries) == 2
+    with pytest.raises(CaptureError, match="safe entry count limit"):
+        asyncio.run(collector.entries())
+
+
 @pytest.mark.parametrize("failure", [None, "new_context", "collector", "interrupt"])
 def test_capture_cleanup_and_safe_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
@@ -214,7 +272,8 @@ def test_capture_cleanup_and_safe_output(
             closed.append("context")
 
     class Browser:
-        async def new_context(self) -> Context:
+        async def new_context(self, *, service_workers: str) -> Context:
+            assert service_workers == "block"
             if failure == "new_context":
                 raise RuntimeError()
             return Context()
@@ -224,6 +283,7 @@ def test_capture_cleanup_and_safe_output(
 
     class Chromium:
         async def launch(self, **kwargs: object) -> Browser:
+            assert kwargs == {"headless": True, "args": ["--no-proxy-server"]}
             return Browser()
 
     class Manager:
@@ -276,7 +336,8 @@ def test_capture_writes_a_complete_har_entry(
             return None
 
     class Browser:
-        async def new_context(self) -> Context:
+        async def new_context(self, *, service_workers: str) -> Context:
+            assert service_workers == "block"
             return Context()
 
         async def close(self) -> None:
@@ -284,6 +345,7 @@ def test_capture_writes_a_complete_har_entry(
 
     class Chromium:
         async def launch(self, **kwargs: object) -> Browser:
+            assert kwargs == {"headless": True, "args": ["--no-proxy-server"]}
             return Browser()
 
     class Manager:
@@ -300,18 +362,56 @@ def test_capture_writes_a_complete_har_entry(
         async def entries(self) -> list[dict[str, Any]]:
             return [
                 {
+                    "collectorExtension": "collector-extension-sentinel",
                     "request": {
                         "method": "POST",
-                        "url": "https://api.example.test/v1/items",
+                        "url": (
+                            "https://api.example.test/v1/items?opaque=query-value-sentinel"
+                        ),
                         "headers": [
-                            {"name": "Content-Type", "value": "application/json"}
+                            {
+                                "name": "Content-Type",
+                                "value": (
+                                    "application/problem+json; charset=utf-8;"
+                                    " boundary=mime-parameter-value-sentinel"
+                                ),
+                            },
+                            {"name": "X-Auth", "value": "x-auth-value-sentinel"},
+                            {"name": "X-Session", "value": "x-session-value-sentinel"},
                         ],
-                        "postData": {"mimeType": "application/json", "text": '{"id":"1"}'},
+                        "postData": {
+                            "mimeType": (
+                                "application/problem+json; charset=utf-8;"
+                                " boundary=mime-parameter-value-sentinel"
+                            ),
+                            "text": (
+                                '{"id":"1","auth":"json-auth-value-sentinel",'
+                                '"session":"json-session-value-sentinel",'
+                                '"neutral":"json-neutral-value-sentinel",'
+                                '"active":true,"items":[7,null]}'
+                            ),
+                        },
                     },
                     "response": {
                         "status": 201,
-                        "headers": [{"name": "Location", "value": "/v1/items/1"}],
-                        "content": {},
+                        "headers": [
+                            {
+                                "name": "Location",
+                                "value": (
+                                    "/v1/items/1?opaque=location-query-value-sentinel"
+                                ),
+                            },
+                            {
+                                "name": "Content-Location",
+                                "value": (
+                                    "https://api.example.test/v1/items/1"
+                                    "?opaque=content-location-query-value-sentinel"
+                                ),
+                            },
+                            {"name": "Link", "value": "link-value-sentinel"},
+                            {"name": "Refresh", "value": "refresh-value-sentinel"},
+                        ],
+                        "content": {"text": "response-body-value-sentinel"},
                     },
                 }
             ]
@@ -325,7 +425,25 @@ def test_capture_writes_a_complete_har_entry(
         capture.capture_har(make_config(tmp_path), Guard(), collector=Collector())
     )
 
-    document = json.loads(output.read_text(encoding="utf-8"))
+    output_bytes = output.read_bytes()
+    for marker in (
+        b"collector-extension-sentinel",
+        b"query-value-sentinel",
+        b"x-auth-value-sentinel",
+        b"x-session-value-sentinel",
+        b"mime-parameter-value-sentinel",
+        b"json-auth-value-sentinel",
+        b"json-session-value-sentinel",
+        b"json-neutral-value-sentinel",
+        b"location-query-value-sentinel",
+        b"content-location-query-value-sentinel",
+        b"link-value-sentinel",
+        b"refresh-value-sentinel",
+        b"response-body-value-sentinel",
+    ):
+        assert marker not in output_bytes
+
+    document = json.loads(output_bytes)
     [entry] = document["log"]["entries"]
     assert set(entry) == {
         "startedDateTime",
@@ -347,9 +465,21 @@ def test_capture_writes_a_complete_har_entry(
         "postData",
     }
     assert entry["request"]["postData"] == {
-        "mimeType": "application/json",
-        "text": '{"id":"1"}',
+        "mimeType": "application/problem+json",
+        "text": (
+            '{"id":"[REDACTED]","auth":"[REDACTED]",'
+            '"session":"[REDACTED]","neutral":"[REDACTED]",'
+            '"active":"[REDACTED]","items":["[REDACTED]","[REDACTED]"]}'
+        ),
     }
+    assert entry["request"]["queryString"] == [
+        {"name": "opaque", "value": "[REDACTED]"}
+    ]
+    assert entry["request"]["headers"] == [
+        {"name": "Content-Type", "value": "application/problem+json"},
+        {"name": "X-Auth", "value": "[REDACTED]"},
+        {"name": "X-Session", "value": "[REDACTED]"},
+    ]
     assert set(entry["response"]) == {
         "status",
         "statusText",
@@ -362,6 +492,20 @@ def test_capture_writes_a_complete_har_entry(
         "bodySize",
     }
     assert entry["response"]["content"] == {"size": 0, "mimeType": ""}
+    assert entry["response"]["headers"] == [
+        {
+            "name": "Location",
+            "value": "/v1/items/1?opaque=%5BREDACTED%5D",
+        },
+        {
+            "name": "Content-Location",
+            "value": (
+                "https://api.example.test/v1/items/1?opaque=%5BREDACTED%5D"
+            ),
+        },
+        {"name": "Link", "value": "[REDACTED]"},
+        {"name": "Refresh", "value": "[REDACTED]"},
+    ]
     assert set(entry["timings"]) == {
         "blocked",
         "dns",
@@ -372,6 +516,34 @@ def test_capture_writes_a_complete_har_entry(
         "ssl",
     }
     assert output.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("case", ["depth", "nodes", "bytes"])
+def test_json_structural_limits_fail_closed(case: str) -> None:
+    from bola_checker import capture
+
+    if case == "depth":
+        value: object = "value"
+        for _ in range(34):
+            value = [value]
+        body = json.dumps({"nested": value})
+    elif case == "nodes":
+        body = json.dumps([0] * 4_096)
+    else:
+        body = '{"value":"' + ("x" * (1024 * 1024)) + '"}'
+
+    assert capture._sanitize_body(body, {"Content-Type": "application/json"}) == b"[REDACTED]"
+
+
+def test_writer_rejects_output_over_configured_size_before_creating_file(
+    tmp_path: Path,
+) -> None:
+    from bola_checker import capture
+
+    with pytest.raises(CaptureError, match="exceeds the configured size limit"):
+        capture._write_sanitized_har(tmp_path, Path("oversized.har"), [], max_bytes=10)
+
+    assert not (tmp_path / "oversized.har").exists()
 
 
 @pytest.mark.parametrize(
@@ -429,7 +601,8 @@ def test_capture_uses_real_route_handler_for_denial_cidr_and_direct_ip(
             return None
 
     class Browser:
-        async def new_context(self) -> Context:
+        async def new_context(self, *, service_workers: str) -> Context:
+            assert service_workers == "block"
             return Context()
 
         async def close(self) -> None:
@@ -437,6 +610,7 @@ def test_capture_uses_real_route_handler_for_denial_cidr_and_direct_ip(
 
     class Chromium:
         async def launch(self, **kwargs: object) -> Browser:
+            assert kwargs == {"headless": True, "args": ["--no-proxy-server"]}
             return Browser()
 
     class Manager:

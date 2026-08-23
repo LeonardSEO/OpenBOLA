@@ -93,9 +93,19 @@ The StateStore planning boundary also filters `untested_combinations()` to
 `HEURISTIC` evidence may be retained as provenance, but can never become an
 executable cross-identity probe through a direct StateStore caller.
 
+StateStore database initialization uses an explicit private-parent trust
+boundary: every parent component is opened without following symlinks, the
+final parent is current-user-owned and not group/world writable, and new leaves
+are created exclusively with mode `0600`. Existing database/WAL/SHM/journal
+files are regular current-user-owned files and are hardened to `0600`; the
+database inode is checked before and after SQLite's path-based open because the
+Python SQLite API does not accept an already-open file descriptor.
+
 ### Validation evidence: integration fix
 
 - `uv run ruff check src/bola_checker/endpoints.py tests/test_endpoints.py`:
   passed.
 - `uv run pytest tests/test_state.py tests/test_endpoints.py`: 44 passed.
 - `uv run mypy src`: passed with no issues.
+- Final repository gate: `uv run pytest -q` — 244 passed; full Ruff and mypy
+  passed.

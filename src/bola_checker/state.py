@@ -4,6 +4,13 @@ This module deliberately stores references to credentials, never credential
 values.  Probe attempts and audit events are append-only so that a later run
 can explain what was attempted without turning a retryable failure into a
 completed test.
+
+SQLite is opened only below a trusted, non-symlink parent owned by the current
+user and not writable by group/other users.  New database leaves are created
+with an exclusive 0600 open; existing database and sidecar files are validated
+as regular, current-user-owned files and made 0600.  Python's sqlite3 API is
+path-based rather than fd-based, so the trusted private parent is the explicit
+TOCTOU boundary and the database inode is verified before and after each open.
 """
 
 from __future__ import annotations
@@ -11,8 +18,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
+import stat
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -49,6 +58,8 @@ _EXECUTABLE_OWNERSHIP_VALUES = tuple(
     )
 )
 _MIGRATION_BUSY_TIMEOUT_MS = 250
+_PRIVATE_FILE_MODE = 0o600
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CREDENTIAL_REFERENCE = re.compile(
     r"(?:env|keyring|vault|memory):[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z"
 )
@@ -85,10 +96,12 @@ _JSON_INTEGER_KEYS = frozenset(
         "identity_id",
         "owner_identity_id",
         "owner_status",
+        "preserved_count",
+        "coalesced_count",
     }
 )
 _JSON_IDENTIFIER_KEYS = frozenset(
-    {"id_field", "identity", "subject", "tenant", "user_id"}
+    {"id_field", "identity", "migration_marker", "subject", "tenant", "user_id"}
 )
 _JSON_ENUM_VALUES: dict[str, frozenset[str]] = {
     "comparison": frozenset(
@@ -574,12 +587,157 @@ class StateStore:
     """A local, migration-managed SQLite store with no credential material."""
 
     def __init__(self, db_path: str | Path = "bola_state.db") -> None:
-        self.db_path = Path(db_path)
+        self.db_path = Path(os.path.abspath(os.fspath(db_path)))
+        self._db_identity = self._prepare_database_path(self.db_path)
         self._initialise()
+
+    @staticmethod
+    def _current_uid() -> int | None:
+        """Return the current owner where the platform exposes Unix UIDs."""
+
+        getter = getattr(os, "getuid", None)
+        return int(getter()) if getter is not None else None
+
+    @classmethod
+    def _validate_directory_stat(cls, metadata: os.stat_result, *, leaf: bool) -> None:
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError("state database parent must be a regular directory")
+        if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise RuntimeError("state database parent must not be group/world writable")
+        uid = cls._current_uid()
+        if leaf and uid is not None and metadata.st_uid != uid:
+            raise RuntimeError("state database parent must be owned by the current user")
+
+    @classmethod
+    def _open_trusted_parent(cls, parent: Path) -> int:
+        """Open every parent component without following a symlink.
+
+        A private final parent is the trust boundary for SQLite's path-based
+        open.  Python's sqlite3 API cannot receive the already-open leaf fd;
+        keeping this descriptor open through each validation makes the path
+        checks deterministic and prevents an untrusted parent substitution.
+        """
+
+        if not parent.is_absolute():  # pragma: no cover - __init__ normalises
+            raise RuntimeError("state database parent must be absolute")
+        parts = parent.parts
+        if not parts:
+            raise RuntimeError("state database parent is invalid")
+        anchor = Path(parts[0])
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _NOFOLLOW
+        try:
+            descriptor = os.open(anchor, flags)
+        except OSError as error:
+            raise RuntimeError("state database parent could not be opened safely") from error
+        try:
+            for component in parts[1:]:
+                if component in {"", ".", ".."}:
+                    continue
+                child = os.open(component, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+                metadata = os.fstat(descriptor)
+                cls._validate_directory_stat(metadata, leaf=False)
+            cls._validate_directory_stat(os.fstat(descriptor), leaf=True)
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    @classmethod
+    def _validate_leaf_stat(cls, metadata: os.stat_result) -> tuple[int, int]:
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError("state database must be a regular file")
+        uid = cls._current_uid()
+        if uid is not None and metadata.st_uid != uid:
+            raise RuntimeError("state database must be owned by the current user")
+        return int(metadata.st_dev), int(metadata.st_ino)
+
+    @classmethod
+    def _harden_existing_leaf(cls, descriptor: int) -> tuple[int, int]:
+        metadata = os.fstat(descriptor)
+        identity = cls._validate_leaf_stat(metadata)
+        os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+        return identity
+
+    @classmethod
+    def _harden_sidecars(cls, parent_fd: int, name: str) -> None:
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = f"{name}{suffix}"
+            try:
+                descriptor = os.open(sidecar, os.O_RDONLY | _NOFOLLOW, dir_fd=parent_fd)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise RuntimeError("SQLite sidecar is not a safe regular file") from error
+            try:
+                metadata = os.fstat(descriptor)
+                cls._validate_leaf_stat(metadata)
+                os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+            finally:
+                os.close(descriptor)
+
+    @classmethod
+    def _prepare_database_path(cls, path: Path) -> tuple[int, int]:
+        parent_fd = cls._open_trusted_parent(path.parent)
+        descriptor = -1
+        try:
+            name = path.name
+            if not name or name in {".", ".."}:
+                raise RuntimeError("state database filename is invalid")
+            create_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | _NOFOLLOW
+            try:
+                descriptor = os.open(
+                    name, create_flags, _PRIVATE_FILE_MODE, dir_fd=parent_fd
+                )
+            except FileExistsError:
+                try:
+                    descriptor = os.open(name, os.O_RDWR | _NOFOLLOW, dir_fd=parent_fd)
+                except PermissionError:
+                    try:
+                        descriptor = os.open(name, os.O_RDONLY | _NOFOLLOW, dir_fd=parent_fd)
+                    except OSError as error:
+                        raise RuntimeError(
+                            "state database path is not a safe regular file"
+                        ) from error
+                except OSError as error:
+                    raise RuntimeError(
+                        "state database path is not a safe regular file"
+                    ) from error
+                identity = cls._harden_existing_leaf(descriptor)
+            else:
+                identity = cls._harden_existing_leaf(descriptor)
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if cls._validate_leaf_stat(current) != identity:
+                raise RuntimeError("state database path changed during initialization")
+            cls._harden_sidecars(parent_fd, name)
+            return identity
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise
+        finally:
+            os.close(parent_fd)
+
+    def _verify_database_identity(self) -> None:
+        parent_fd = self._open_trusted_parent(self.db_path.parent)
+        try:
+            metadata = os.stat(self.db_path.name, dir_fd=parent_fd, follow_symlinks=False)
+            if self._validate_leaf_stat(metadata) != self._db_identity:
+                raise RuntimeError("state database path changed during SQLite access")
+            self._harden_sidecars(parent_fd, self.db_path.name)
+        finally:
+            os.close(parent_fd)
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
+        self._verify_database_identity()
         connection = sqlite3.connect(self.db_path, timeout=5.0)
+        try:
+            self._verify_database_identity()
+        except BaseException:
+            connection.close()
+            raise
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
@@ -769,6 +927,32 @@ class StateStore:
             connection.execute(f"DROP TRIGGER IF EXISTS no_update_{table}")
             connection.execute(f"DROP TRIGGER IF EXISTS no_delete_{table}")
 
+        for statement in (
+            "CREATE TABLE IF NOT EXISTS legacy_finding_events ("
+            "id INTEGER PRIMARY KEY, legacy_finding_id INTEGER NOT NULL, "
+            "legacy_endpoint_template TEXT NOT NULL, legacy_method TEXT NOT NULL, "
+            "legacy_severity TEXT NOT NULL, legacy_object_ref TEXT NOT NULL, "
+            "canonical_title TEXT NOT NULL, canonical_description TEXT NOT NULL, "
+            "evidence_json TEXT NOT NULL, migration_marker TEXT NOT NULL, "
+            "archived_at TEXT NOT NULL, UNIQUE(legacy_finding_id, migration_marker))",
+            "CREATE TRIGGER IF NOT EXISTS no_update_legacy_finding_events "
+            "BEFORE UPDATE ON legacy_finding_events BEGIN "
+            "SELECT RAISE(ABORT, 'legacy finding events are append-only'); END",
+            "CREATE TRIGGER IF NOT EXISTS no_delete_legacy_finding_events "
+            "BEFORE DELETE ON legacy_finding_events BEGIN "
+            "SELECT RAISE(ABORT, 'legacy finding events are append-only'); END",
+        ):
+            connection.execute(statement)
+
+        # Snapshot before endpoint coalescing: the old endpoint row may be
+        # removed below, but every legacy finding still needs an archive row.
+        legacy_findings = connection.execute(
+            "SELECT finding.id, finding.endpoint_id, finding.severity, "
+            "finding.evidence_json, endpoint.template, endpoint.method "
+            "FROM findings AS finding JOIN endpoints AS endpoint "
+            "ON endpoint.id = finding.endpoint_id ORDER BY finding.id"
+        ).fetchall()
+
         connection.execute(
             "ALTER TABLE ownership_evidence RENAME COLUMN object_id TO object_ref"
         )
@@ -836,42 +1020,114 @@ class StateStore:
             connection.execute("DELETE FROM findings WHERE endpoint_id = ?", (endpoint_id,))
             connection.execute("DELETE FROM endpoints WHERE id = ?", (endpoint_id,))
 
-        findings = connection.execute(
-            "SELECT finding.id, finding.severity, finding.evidence_json, "
-            "endpoint.template, endpoint.method FROM findings AS finding "
-            "JOIN endpoints AS endpoint ON endpoint.id = finding.endpoint_id ORDER BY finding.id"
-        ).fetchall()
-        for finding in findings:
+        # Rebuild current findings from the complete snapshot. This allows
+        # duplicate legacy rows and findings attached to coalesced endpoints
+        # to remain represented canonically without losing their archive row.
+        connection.execute("DELETE FROM findings")
+        preserved_count = 0
+        coalesced_count = 0
+        migration_marker = "v3_findings_archive"
+        for finding in legacy_findings:
             raw_evidence = json.loads(str(finding["evidence_json"]))
             if not isinstance(raw_evidence, Mapping):
                 raw_evidence = {"object_ref": object_ref_fingerprint(str(finding["id"]))}
             try:
                 evidence_json = _json_document(raw_evidence)
                 safe_evidence = json.loads(evidence_json)
+                object_ref = safe_evidence.get("object_ref")
+                if not isinstance(object_ref, str):
+                    object_ref = object_ref_fingerprint(f"legacy-finding:{finding['id']}")
+                    safe_evidence = {"object_ref": object_ref}
+                    evidence_json = _json_document(safe_evidence)
+                severity = _validate_finding_severity(str(finding["severity"]))
+                endpoint_id = endpoint_id_map.get(
+                    int(finding["endpoint_id"]), int(finding["endpoint_id"])
+                )
+                endpoint = connection.execute(
+                    "SELECT template, method FROM endpoints WHERE id = ?", (endpoint_id,)
+                ).fetchone()
+                if endpoint is None:
+                    raise ValueError("migrated finding endpoint is missing")
                 title, description = canonical_finding_text(
-                    severity=str(finding["severity"]),
-                    endpoint_template=str(finding["template"]),
-                    method=str(finding["method"]),
+                    severity=severity,
+                    endpoint_template=str(endpoint["template"]),
+                    method=str(endpoint["method"]),
                     evidence=safe_evidence,
                 )
             except (TypeError, ValueError):
-                safe_evidence = {"object_ref": object_ref_fingerprint(str(finding["id"]))}
+                object_ref = object_ref_fingerprint(f"legacy-finding:{finding['id']}")
+                safe_evidence = {"object_ref": object_ref}
                 evidence_json = _json_document(safe_evidence)
+                severity = "info"
+                endpoint_id = endpoint_id_map.get(
+                    int(finding["endpoint_id"]), int(finding["endpoint_id"])
+                )
+                endpoint = connection.execute(
+                    "SELECT template, method FROM endpoints WHERE id = ?", (endpoint_id,)
+                ).fetchone()
+                if endpoint is None:
+                    endpoint = {"template": "/redacted/{id}", "method": "GET"}
                 title, description = canonical_finding_text(
-                    severity=str(finding["severity"]),
-                    endpoint_template=str(finding["template"]),
-                    method=str(finding["method"]),
+                    severity=severity,
+                    endpoint_template=str(endpoint["template"]),
+                    method=str(endpoint["method"]),
                     evidence=safe_evidence,
                 )
             evidence_hash = hashlib.sha256(evidence_json.encode("utf-8")).hexdigest()
-            try:
-                connection.execute(
-                    "UPDATE findings SET title = ?, description = ?, evidence_json = ?, "
-                    "evidence_hash = ? WHERE id = ?",
-                    (title, description, evidence_json, evidence_hash, int(finding["id"])),
-                )
-            except sqlite3.IntegrityError:
-                connection.execute("DELETE FROM findings WHERE id = ?", (int(finding["id"]),))
+            connection.execute(
+                "INSERT OR IGNORE INTO legacy_finding_events("
+                "legacy_finding_id, legacy_endpoint_template, legacy_method, "
+                "legacy_severity, legacy_object_ref, canonical_title, "
+                "canonical_description, evidence_json, migration_marker, archived_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    int(finding["id"]),
+                    _redacted_endpoint_template(str(finding["template"])),
+                    _validate_method(str(finding["method"])),
+                    severity,
+                    object_ref,
+                    title,
+                    description,
+                    evidence_json,
+                    migration_marker,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            preserved_count += 1
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO findings("
+                "endpoint_id, severity, title, description, evidence_json, evidence_hash, found_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    endpoint_id,
+                    severity,
+                    title,
+                    description,
+                    evidence_json,
+                    evidence_hash,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            if cursor.rowcount == 0:
+                coalesced_count += 1
+
+        if legacy_findings:
+            migration_audit = _json_document(
+                {
+                    "migration_marker": migration_marker,
+                    "preserved_count": preserved_count,
+                    "coalesced_count": coalesced_count,
+                }
+            )
+            connection.execute(
+                "INSERT INTO audit_events(event_type, occurred_at, run_id, data_json) "
+                "VALUES (?, ?, NULL, ?)",
+                (
+                    AuditEventType.LEGACY_EVENT_REDACTED.value,
+                    datetime.now(UTC).isoformat(),
+                    migration_audit,
+                ),
+            )
 
         runs = connection.execute("SELECT id, label FROM runs ORDER BY id").fetchall()
         for run in runs:

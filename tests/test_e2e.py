@@ -13,14 +13,20 @@ from bola_checker.models import RequestRecord, Verdict
 from bola_checker.pipeline import IdentityInput, PipelineError, run_pipeline
 
 
-def _scope(path: Path, *, paths: list[str] | None = None, confirmed: bool = True) -> Path:
+def _scope(
+    path: Path,
+    *,
+    paths: list[str] | None = None,
+    confirmed: bool = True,
+    expires_seconds: int = 300,
+) -> Path:
     now = datetime.now(UTC)
     document = {
         "client_name": "BOLACheck local E2E",
         "authorization_reference": "LOCAL-E2E-AUTHZ",
         "confirmed": confirmed,
         "starts_at": (now - timedelta(minutes=1)).isoformat(),
-        "expires_at": (now + timedelta(minutes=5)).isoformat(),
+        "expires_at": (now + timedelta(seconds=expires_seconds)).isoformat(),
         "allowed_hosts": [],
         "allowed_cidrs": ["127.0.0.0/8"],
         "allowed_paths": paths or ["glob:/api/**"],
@@ -167,6 +173,39 @@ def test_mixed_origins_fail_closed_before_any_probe(tmp_path: Path) -> None:
                 root / "mixed-reports",
             )
         assert target.request_count == 0
+
+
+def test_pipeline_samples_callable_clock_for_attacker_request(tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+    with MockTarget() as target:
+        scope = _scope(root / "expiring.yaml", expires_seconds=1)
+        initial = datetime.now(UTC)
+        calls = 0
+
+        def advancing_clock() -> datetime:
+            nonlocal calls
+            calls += 1
+            # Scope loading, import checks, and the owner request are valid;
+            # the next sample expires before the attacker request.
+            return initial if calls <= 5 else initial + timedelta(seconds=10)
+
+        inputs = [replace(identity, records=(identity.records[0],)) for identity in _inputs(target)]
+        result = run_pipeline(
+            scope,
+            target.base_url,
+            inputs,
+            root / "expiring.db",
+            root / "expiring-reports",
+            now=advancing_clock,
+        )
+
+    assert len(result.outcomes) == 1
+    outcome = result.outcomes[0]
+    assert outcome.verdict is Verdict.INCONCLUSIVE
+    assert outcome.owner_status == 200
+    assert outcome.attacker_status is None
+    assert outcome.evidence["error_code"] == "scope_denied"
+    assert target.request_count == 1
 
 
 def test_non_path_candidates_are_skipped_without_requests(tmp_path: Path) -> None:

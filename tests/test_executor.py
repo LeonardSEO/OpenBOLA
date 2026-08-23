@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from collections.abc import Callable
@@ -271,6 +272,7 @@ def test_mutation_requires_canary_and_cleanup(tmp_path: Path) -> None:
             cleanup_method="DELETE",
             cleanup_path="/v1/documents/{id}/canary",
             body={"canary": "bola-canary"},
+            cleanup_body={"canary": "bola-canary"},
         ),
     )
 
@@ -350,7 +352,10 @@ def test_equal_bodies_without_object_ids_do_not_establish_bola(tmp_path: Path) -
 
 
 def test_failed_cleanup_overrides_primary_bola_result(tmp_path: Path) -> None:
+    calls: list[str] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
         if request.method == "DELETE":
             return httpx.Response(500)
         return httpx.Response(200, json={"id": "doc-1"})
@@ -364,11 +369,13 @@ def test_failed_cleanup_overrides_primary_bola_result(tmp_path: Path) -> None:
             cleanup_method="DELETE",
             cleanup_path="/v1/documents/{id}/canary",
             body={"canary": "cleanup-canary"},
+            cleanup_body={"canary": "cleanup-canary"},
         ),
     )
 
     assert result.verdict is Verdict.INCONCLUSIVE
     assert result.evidence["error_code"] == "invalid_response"
+    assert calls == ["POST", "DELETE"]
 
 
 def test_mutation_reserves_budget_for_cleanup(tmp_path: Path) -> None:
@@ -387,6 +394,7 @@ def test_mutation_reserves_budget_for_cleanup(tmp_path: Path) -> None:
             cleanup_method="DELETE",
             cleanup_path="/v1/documents/{id}/canary",
             body={"canary": "budget-canary"},
+            cleanup_body={"canary": "budget-canary"},
         ),
     )
 
@@ -412,11 +420,182 @@ def test_unexpected_primary_error_still_attempts_cleanup(tmp_path: Path) -> None
             cleanup_method="DELETE",
             cleanup_path="/v1/documents/{id}/canary",
             body={"canary": "finally-canary"},
+            cleanup_body={"canary": "finally-canary"},
         ),
     )
 
     assert result.verdict is Verdict.INCONCLUSIVE
-    assert calls == ["POST", "DELETE", "POST", "DELETE"]
+    assert calls == ["POST", "DELETE"]
+
+
+def test_redirect_to_another_allowed_origin_does_not_reuse_credentials(tmp_path: Path) -> None:
+    scope = {
+        "client_name": "redirect fixture",
+        "authorization_reference": "REDIRECT-ORIGIN",
+        "confirmed": True,
+        "starts_at": "2026-08-23T10:00:00Z",
+        "expires_at": "2026-08-23T14:00:00Z",
+        "allowed_hosts": ["one.example.test", "two.example.test"],
+        "allowed_cidrs": [],
+        "allowed_paths": ["glob:/v1/**"],
+    }
+    scope_path = tmp_path / "scope.yaml"
+    scope_path.write_text(yaml.safe_dump(scope), encoding="utf-8")
+    loaded_guard = ScopeGuard.from_file(scope_path, now=NOW)
+
+    class CountingGuard(ScopeGuard):
+        count = 0
+
+        def require_allowed(self, *args: Any, **kwargs: Any) -> Any:
+            self.count += 1
+            return super().require_allowed(*args, **kwargs)
+
+    guard = CountingGuard(loaded_guard.config, now=NOW)
+    vault = CredentialVault()
+    owner = _credential(vault, "owner", "owner-token")
+    attacker = _credential(vault, "attacker", "attacker-token")
+    target = ProbeTarget(
+        base_url="https://one.example.test",
+        endpoint_template="/v1/documents/{id}",
+        method="GET",
+        object_id="doc-1",
+        owner_identity="owner",
+        attacker_identity="attacker",
+        owner_credential=owner,
+        attacker_credential=attacker,
+    )
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(302, headers={"Location": "https://two.example.test/v1/final"})
+
+    result = ProbeExecutor(
+        guard,
+        vault,
+        transport=httpx.MockTransport(handler),
+        now=NOW,
+        limits=ExecutorLimits(requests_per_second=1_000),
+    ).run(target)
+
+    assert result.verdict is Verdict.INCONCLUSIVE
+    assert calls == [
+        "https://one.example.test/v1/documents/doc-1",
+        "https://one.example.test/v1/documents/doc-1",
+    ]
+    assert guard.count == 4
+
+
+def test_https_to_http_redirect_is_blocked_before_second_request(tmp_path: Path) -> None:
+    scope = {
+        "client_name": "redirect fixture",
+        "authorization_reference": "REDIRECT-DOWNGRADE",
+        "confirmed": True,
+        "starts_at": "2026-08-23T10:00:00Z",
+        "expires_at": "2026-08-23T14:00:00Z",
+        "allowed_hosts": ["one.example.test"],
+        "allowed_cidrs": [],
+        "allowed_paths": ["glob:/v1/**"],
+    }
+    scope_path = tmp_path / "scope.yaml"
+    scope_path.write_text(yaml.safe_dump(scope), encoding="utf-8")
+    guard = ScopeGuard.from_file(scope_path, now=NOW)
+    vault = CredentialVault()
+    owner = _credential(vault, "owner", "owner-token")
+    attacker = _credential(vault, "attacker", "attacker-token")
+    target = ProbeTarget(
+        base_url="https://one.example.test",
+        endpoint_template="/v1/documents/{id}",
+        method="GET",
+        object_id="doc-1",
+        owner_identity="owner",
+        attacker_identity="attacker",
+        owner_credential=owner,
+        attacker_credential=attacker,
+    )
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(302, headers={"Location": "http://one.example.test/v1/final"})
+
+    result = ProbeExecutor(
+        guard,
+        vault,
+        transport=httpx.MockTransport(handler),
+        now=NOW,
+        limits=ExecutorLimits(requests_per_second=1_000),
+    ).run(target)
+
+    assert result.verdict is Verdict.INCONCLUSIVE
+    assert calls == [
+        "https://one.example.test/v1/documents/doc-1",
+        "https://one.example.test/v1/documents/doc-1",
+    ]
+
+
+def test_async_client_disables_ambient_proxy_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+    original = httpx.AsyncClient
+
+    class SpyClient(original):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            seen["trust_env"] = kwargs.get("trust_env")
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", SpyClient)
+    executor, vault = _executor(
+        tmp_path,
+        lambda request: httpx.Response(200, json={"id": "doc-1"}),
+    )
+    executor.run(_target(vault))
+
+    assert seen["trust_env"] is False
+
+
+def test_deep_response_json_fails_closed_without_recursion_error(tmp_path: Path) -> None:
+    deep: Any = {"id": "doc-1"}
+    for _ in range(40):
+        deep = {"nested": deep}
+    executor, vault = _executor(
+        tmp_path,
+        lambda request: httpx.Response(200, json=deep),
+    )
+
+    result = executor.run(_target(vault))
+
+    assert result.verdict is Verdict.INCONCLUSIVE
+    assert result.evidence["comparison"] == "object_id_mismatch"
+
+
+def test_cancellation_after_dispatch_still_cleans_up_and_stops_attacker(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        if request.method == "POST":
+            raise asyncio.CancelledError()
+        return httpx.Response(204)
+
+    executor, vault = _executor(tmp_path, handler, mutation=True)
+    result = executor.run(
+        _target(vault, mode=ProbeMode.MUTATION),
+        mutation=MutationSpec(
+            method="POST",
+            canary="cancel-canary",
+            cleanup_method="DELETE",
+            cleanup_path="/v1/documents/{id}/canary",
+            body={"canary": "cancel-canary"},
+            cleanup_body={"canary": "cancel-canary"},
+        ),
+    )
+
+    assert result.verdict is Verdict.INCONCLUSIVE
+    assert calls == ["POST", "DELETE"]
 
 
 @pytest.mark.parametrize(

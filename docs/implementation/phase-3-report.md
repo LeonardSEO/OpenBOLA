@@ -304,3 +304,42 @@ Success: no issues found in 15 source files
 git diff --check
 (no output)
 ```
+
+## Fix round 6: immutable legacy finding archive
+
+The v2-to-v3 migration now snapshots every legacy finding before endpoint
+coalescing, writes one sanitized immutable row to `legacy_finding_events`, and
+rebuilds the current `findings` table from canonical opaque evidence. Duplicate
+legacy findings may coalesce into one current finding, but each legacy ID keeps
+its own archive row with a deterministic `obj_` reference, canonical title and
+description, safe endpoint/method, evidence JSON, and migration marker. Archive
+rows have independent append-only update/delete triggers.
+
+When legacy findings exist, migration appends a bounded
+`legacy_event_redacted` audit event with the migration marker and preserved vs.
+coalesced counts. Fresh databases do not emit a synthetic migration event, and
+reopening a successfully migrated database is idempotent. Archive and current
+finding rows are covered by raw-sentinel scans across the database and SQLite
+sidecars.
+
+Validation for this fix round, executed on 2026-08-24:
+
+```text
+uv run pytest tests/test_state.py -q
+39 passed
+
+uv run ruff check src/bola_checker/state.py tests/test_state.py
+All checks passed!
+
+uv run mypy src/bola_checker/state.py
+Success: no issues found in 1 source file
+
+uv run pytest -q
+244 passed
+
+uv run ruff check .
+All checks passed!
+
+uv run mypy src
+Success: no issues found in 15 source files
+```

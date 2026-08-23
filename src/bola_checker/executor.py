@@ -39,6 +39,8 @@ _HTTP_METHOD = re.compile(r"[A-Z]{1,10}\Z")
 _HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _OBJECT_REF = re.compile(r"obj_[0-9a-f]{64}\Z")
+_MAX_JSON_DEPTH = 32
+_MAX_JSON_NODES = 10_000
 _ERROR_CODES = frozenset(
     {
         "timeout",
@@ -184,26 +186,42 @@ class _Exchange:
     error_code: str | None = None
     retryable: bool = False
     redirect_target: str | None = None
+    sent: bool = False
+    cleanup_failed: bool = False
 
 
 class _ResponseTooLarge(Exception):
     pass
 
 
+class _RequestFailure(Exception):
+    def __init__(self, code: str, *, retryable: bool, sent: bool) -> None:
+        self.code = code
+        self.retryable = retryable
+        self.sent = sent
+        super().__init__(code)
+
+
 def _object_values(value: Any, field_name: str) -> tuple[str, ...]:
     values: list[str] = []
-    if isinstance(value, Mapping):
-        for key, child in value.items():
-            if (
-                str(key) == field_name
-                and isinstance(child, (str, int, float))
-                and not isinstance(child, bool)
-            ):
-                values.append(str(child))
-            values.extend(_object_values(child, field_name))
-    elif isinstance(value, list):
-        for child in value:
-            values.extend(_object_values(child, field_name))
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_JSON_NODES or depth > _MAX_JSON_DEPTH:
+            raise ValueError("JSON response exceeds comparison limits")
+        if isinstance(current, Mapping):
+            for key, child in current.items():
+                if (
+                    str(key) == field_name
+                    and isinstance(child, (str, int, float))
+                    and not isinstance(child, bool)
+                ):
+                    values.append(str(child))
+                stack.append((child, depth + 1))
+        elif isinstance(current, list):
+            stack.extend((child, depth + 1) for child in current)
     return tuple(values)
 
 
@@ -225,13 +243,17 @@ def _parse_body(body: bytes, content_type: str, id_field: str) -> tuple[tuple[st
         return (), fingerprint
     try:
         decoded = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (RecursionError, UnicodeDecodeError, json.JSONDecodeError):
         return (), fingerprint
     try:
         canonical = _canonical_json(decoded).encode("utf-8")
-    except (TypeError, ValueError):
+    except (RecursionError, TypeError, ValueError):
         return (), fingerprint
-    return _object_values(decoded, id_field), hashlib.sha256(canonical).hexdigest()
+    try:
+        object_values = _object_values(decoded, id_field)
+    except (RecursionError, TypeError, ValueError):
+        return (), fingerprint
+    return object_values, hashlib.sha256(canonical).hexdigest()
 
 
 def _safe_body(value: bytes | str | Mapping[str, Any] | None) -> tuple[bytes | None, str | None]:
@@ -243,8 +265,9 @@ def _safe_body(value: bytes | str | Mapping[str, Any] | None) -> tuple[bytes | N
         body = value.encode("utf-8")
     else:
         try:
+            _object_values(value, "__never_match__")
             body = _canonical_json(value).encode("utf-8")
-        except (TypeError, ValueError) as error:
+        except (RecursionError, TypeError, ValueError) as error:
             raise MutationSafetyError("mutation body is not JSON serializable") from error
     if len(body) > 256 * 1024:
         raise MutationSafetyError("mutation body exceeds the safety limit")
@@ -274,6 +297,14 @@ def _fill_url(base_url: str, endpoint_template: str, object_id: str) -> str:
     if not path.startswith("/"):
         path = "/" + path
     return urlunsplit((base.scheme, base.netloc, path, parsed_endpoint.query, ""))
+
+
+def _origin_key(url: str) -> tuple[str, str, int]:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("redirect target is not an HTTP(S) URL")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return parsed.scheme.lower(), parsed.hostname.lower(), port
 
 
 class ProbeExecutor:
@@ -337,7 +368,12 @@ class ProbeExecutor:
         except ExecutorError:
             return self._finish(self._failed(target, "invalid_response", retryable=False))
         owner = self._identity_exchange(target, target.owner_credential, owner_url, mutation)
-        attacker = self._identity_exchange(target, target.attacker_credential, owner_url, mutation)
+        if mutation is not None and (owner.cleanup_failed or owner.error_code is not None):
+            attacker = _Exchange(None, "invalid_response", False)
+        else:
+            attacker = self._identity_exchange(
+                target, target.attacker_credential, owner_url, mutation
+            )
         verdict, comparison = self._compare(target, owner, attacker)
         evidence: dict[str, Any] = {
             "object_ref": _object_ref(target.object_id),
@@ -410,6 +446,13 @@ class ProbeExecutor:
             mutation_body, _ = _safe_body(mutation.body)
             if mutation_body is None or mutation.canary.encode("utf-8") not in mutation_body:
                 raise MutationSafetyError("mutation body must carry the declared canary")
+            cleanup_body, _ = _safe_body(mutation.cleanup_body)
+            cleanup_template = mutation.cleanup_path or mutation.path or target.endpoint_template
+            if (
+                (cleanup_body is None or mutation.canary.encode("utf-8") not in cleanup_body)
+                and mutation.canary not in cleanup_template
+            ):
+                raise MutationSafetyError("cleanup must be bound to the declared canary")
 
     def _identity_exchange(
         self,
@@ -444,6 +487,7 @@ class ProbeExecutor:
             )
             method = mutation.method.upper()
             reservation = [2]
+            dispatch_started = [False]
             if not self._reserve_budget(2):
                 return _Exchange(None, "rate_limited", False)
         if cleanup is None:
@@ -472,34 +516,43 @@ class ProbeExecutor:
                 content_type=content_type,
                 allow_redirects=False,
                 reservation=reservation,
+                dispatch_started=dispatch_started,
             )
         except BaseException as error:
             primary_exception = error
         finally:
-            try:
-                cleanup_result = self._request_with_redirects(
-                    cleanup[0],
-                    cleanup[1],
-                    credential,
-                    target.id_field,
-                    body=cleanup[2],
-                    content_type=cleanup[3],
-                    allow_redirects=False,
-                    reservation=reservation,
-                )
-            except BaseException as error:
-                cleanup_exception = error
+            if (exchange is not None and exchange.sent) or dispatch_started[0]:
+                try:
+                    cleanup_result = self._request_with_redirects(
+                        cleanup[0],
+                        cleanup[1],
+                        credential,
+                        target.id_field,
+                        body=cleanup[2],
+                        content_type=cleanup[3],
+                        allow_redirects=False,
+                        reservation=reservation,
+                    )
+                except BaseException as error:
+                    cleanup_exception = error
 
         try:
             if primary_exception is not None and not isinstance(primary_exception, Exception):
-                raise primary_exception
+                exchange = _Exchange(None, "transport_error", False, sent=True)
             if exchange is None:
                 exchange = _Exchange(None, "invalid_response", False)
+            if not exchange.sent:
+                return _Exchange(
+                    response=exchange.response,
+                    error_code=exchange.error_code or "invalid_response",
+                    retryable=exchange.retryable,
+                )
             if cleanup_exception is not None or cleanup_result is None:
                 return _Exchange(
                     response=exchange.response,
                     error_code="invalid_response",
                     retryable=exchange.retryable,
+                    cleanup_failed=True,
                 )
             if (
                 cleanup_result.error_code is not None
@@ -510,6 +563,7 @@ class ProbeExecutor:
                     response=exchange.response,
                     error_code="invalid_response",
                     retryable=exchange.retryable or cleanup_result.retryable,
+                    cleanup_failed=True,
                 )
             return exchange
         finally:
@@ -526,9 +580,14 @@ class ProbeExecutor:
         content_type: str | None,
         allow_redirects: bool,
         reservation: list[int] | None = None,
+        dispatch_started: list[bool] | None = None,
     ) -> _Exchange:
         current_method = method
         current_url = url
+        try:
+            origin = _origin_key(url)
+        except ValueError:
+            return _Exchange(None, "scope_denied", False)
         redirects = 0
         retries = 0
         while True:
@@ -541,11 +600,26 @@ class ProbeExecutor:
                     body=body,
                     content_type=content_type,
                     reservation=reservation,
+                    dispatch_started=dispatch_started,
                 )
             except ScopeError:
                 if redirects:
-                    return _Exchange(None, "redirect_blocked", False, current_url)
+                    return _Exchange(None, "redirect_blocked", False, current_url, True)
                 return _Exchange(None, "scope_denied", False)
+            except _RequestFailure as failure:
+                if (
+                    current_method in _SAFE_METHODS
+                    and failure.retryable
+                    and retries < self.limits.max_retries
+                ):
+                    retries += 1
+                    continue
+                return _Exchange(
+                    None,
+                    failure.code,
+                    failure.retryable,
+                    sent=failure.sent,
+                )
             except _ResponseTooLarge:
                 return _Exchange(None, "invalid_response", False)
             except httpx.TimeoutException:
@@ -565,18 +639,38 @@ class ProbeExecutor:
                 if current_method in _SAFE_METHODS and retries < self.limits.max_retries:
                     retries += 1
                     continue
-                return _Exchange(response, "rate_limited", current_method in _SAFE_METHODS)
+                return _Exchange(
+                    response,
+                    "rate_limited",
+                    current_method in _SAFE_METHODS,
+                    sent=True,
+                )
             if response.status not in {301, 302, 303, 307, 308}:
                 return exchange
             location = exchange.redirect_target
             if not location:
-                return _Exchange(response, "redirect_blocked", False)
+                return _Exchange(response, "redirect_blocked", False, sent=True)
             if not allow_redirects or redirects >= self.limits.max_redirects:
-                return _Exchange(response, "redirect_blocked", False, location)
+                return _Exchange(response, "redirect_blocked", False, location, True)
             next_url = urljoin(current_url, location)
+            next_method = (
+                "GET" if response.status in {301, 302, 303} else current_method
+            )
+            try:
+                # Check policy before the origin boundary so every redirect
+                # target receives an explicit ScopeGuard decision, even when
+                # credentials will be withheld due to a cross-origin hop.
+                self.scope_guard.require_allowed(next_url, next_method, now=self._clock())
+            except ScopeError:
+                return _Exchange(response, "redirect_blocked", False, next_url, True)
+            try:
+                if _origin_key(next_url) != origin:
+                    return _Exchange(response, "redirect_blocked", False, next_url, True)
+            except ValueError:
+                return _Exchange(response, "redirect_blocked", False, next_url, True)
             if response.status in {301, 302, 303}:
                 if current_method not in _SAFE_METHODS:
-                    return _Exchange(response, "redirect_blocked", False, next_url)
+                    return _Exchange(response, "redirect_blocked", False, next_url, True)
                 current_method = "GET"
                 body = None
                 content_type = None
@@ -593,10 +687,14 @@ class ProbeExecutor:
         body: bytes | None,
         content_type: str | None,
         reservation: list[int] | None = None,
+        dispatch_started: list[bool] | None = None,
     ) -> _Exchange:
         decision = self.scope_guard.require_allowed(url, method, now=self._clock())
         self._ensure_peer_policy(decision)
-        headers = self._credential_headers(credential)
+        try:
+            headers = self._credential_headers(credential)
+        except httpx.TransportError as error:
+            raise _RequestFailure("transport_error", retryable=False, sent=False) from error
         if content_type is not None:
             headers["Content-Type"] = content_type
         with self._request_lock:
@@ -612,9 +710,12 @@ class ProbeExecutor:
                 time.sleep(wait)
             self._request_count += 1
             self._last_request_at = time.monotonic()
+        sent = True
         try:
             asyncio.get_running_loop()
         except RuntimeError:
+            if dispatch_started is not None:
+                dispatch_started[0] = True
             try:
                 return asyncio.run(
                     self._async_request(
@@ -626,9 +727,31 @@ class ProbeExecutor:
                     )
                 )
             except TimeoutError as error:
-                raise httpx.ReadTimeout("request deadline exceeded") from error
-        raise httpx.TransportError(
-            "synchronous executor cannot run inside an active event loop"
+                raise _RequestFailure(
+                    "timeout", retryable=method in _SAFE_METHODS, sent=sent
+                ) from error
+            except httpx.TimeoutException as error:
+                raise _RequestFailure(
+                    "timeout", retryable=method in _SAFE_METHODS, sent=sent
+                ) from error
+            except httpx.TransportError as error:
+                raise _RequestFailure(
+                    "transport_error", retryable=method in _SAFE_METHODS, sent=sent
+                ) from error
+            except _ResponseTooLarge as error:
+                raise _RequestFailure("invalid_response", retryable=False, sent=sent) from error
+            except Exception as error:
+                raise _RequestFailure(
+                    "transport_error", retryable=False, sent=sent
+                ) from error
+            except BaseException as error:
+                # A cancellation/interrupt after dispatch may have reached the
+                # target. Preserve that fact so mutation cleanup is attempted.
+                raise _RequestFailure(
+                    "transport_error", retryable=False, sent=sent
+                ) from error
+        raise _RequestFailure(
+            "transport_error", retryable=False, sent=False
         )
 
     async def _async_request(
@@ -640,7 +763,11 @@ class ProbeExecutor:
         id_field: str,
     ) -> _Exchange:
         timeout = httpx.Timeout(self.limits.timeout_seconds)
-        client_kwargs: dict[str, Any] = {"follow_redirects": False, "timeout": timeout}
+        client_kwargs: dict[str, Any] = {
+            "follow_redirects": False,
+            "timeout": timeout,
+            "trust_env": False,
+        }
         if self.transport is not None:
             client_kwargs["transport"] = self.transport
         async with asyncio.timeout(self.limits.timeout_seconds):
@@ -664,6 +791,7 @@ class ProbeExecutor:
                             body_fingerprint=body_fingerprint,
                         ),
                         redirect_target=response.headers.get("location"),
+                        sent=True,
                     )
 
     def _reserve_budget(self, count: int) -> bool:

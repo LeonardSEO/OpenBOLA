@@ -14,7 +14,7 @@ import json
 import os
 import re
 import sqlite3
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,10 +50,53 @@ _REDACTED = "[REDACTED]"
 _MAX_RECORDS = 10_000
 _MAX_RECORDS_FILE_BYTES = 8 * 1024 * 1024
 _MAX_RECORD_BODY_BYTES = 1 * 1024 * 1024
+_MAX_RECORD_JSON_DEPTH = 32
+_MAX_RECORD_JSON_NODES = 4_096
+_MAX_RECORD_JSON_STRING = 16 * 1024
+_MAX_RECORD_HEADERS = 256
 
 
 class PipelineError(RuntimeError):
     """A bounded, user-facing orchestration error."""
+
+
+def _validate_record_shape(value: Any, *, depth: int = 0, nodes: list[int] | None = None) -> None:
+    """Reject deeply nested or oversized evidence before conversion/serialization."""
+    if nodes is None:
+        nodes = [0]
+    nodes[0] += 1
+    if nodes[0] > _MAX_RECORD_JSON_NODES or depth > _MAX_RECORD_JSON_DEPTH:
+        raise PipelineError("traffic record structure exceeds the safety limit")
+    if isinstance(value, Mapping):
+        if len(value) > _MAX_RECORD_JSON_NODES:
+            raise PipelineError("traffic record mapping exceeds the safety limit")
+        for key, child in value.items():
+            if not isinstance(key, str) or len(key) > _MAX_RECORD_JSON_STRING:
+                raise PipelineError("traffic record key exceeds the safety limit")
+            _validate_record_shape(child, depth=depth + 1, nodes=nodes)
+    elif isinstance(value, (list, tuple)):
+        if len(value) > _MAX_RECORD_JSON_NODES:
+            raise PipelineError("traffic record list exceeds the safety limit")
+        for child in value:
+            _validate_record_shape(child, depth=depth + 1, nodes=nodes)
+    elif isinstance(value, (str, bytes)) and len(value) > _MAX_RECORD_JSON_STRING:
+        raise PipelineError("traffic record value exceeds the safety limit")
+
+
+def _record_headers(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping) or len(value) > _MAX_RECORD_HEADERS:
+        raise PipelineError("traffic record headers exceed the safety limit")
+    headers: dict[str, str] = {}
+    for key, item in value.items():
+        if (
+            not isinstance(key, str)
+            or not isinstance(item, str)
+            or len(key) > 256
+            or len(item) > _MAX_RECORD_JSON_STRING
+        ):
+            raise PipelineError("traffic record headers must contain bounded strings")
+        headers[key] = item
+    return headers
 
 
 @dataclass(frozen=True)
@@ -128,15 +171,15 @@ class PipelineResult:
 def _record_from_mapping(value: Mapping[str, Any], identity: str) -> RequestRecord:
     """Convert a safe structural record without accepting transport secrets."""
 
+    _validate_record_shape(value)
+
     url = value.get("url")
     method = value.get("method", "GET")
     if not isinstance(url, str) or not isinstance(method, str):
         raise PipelineError("traffic records require string url and method")
     headers = value.get("headers", {})
     response_headers = value.get("response_headers", {})
-    if not isinstance(headers, Mapping) or not isinstance(response_headers, Mapping):
-        raise PipelineError("traffic record headers must be mappings")
-    safe_headers = {str(key): str(item) for key, item in headers.items()}
+    safe_headers = _record_headers(headers)
     # A records JSON file is an evidence input, not a credential transport.
     # Reject obvious auth values rather than persisting or replaying them.
     for key, item in safe_headers.items():
@@ -170,13 +213,20 @@ def _record_from_mapping(value: Mapping[str, Any], identity: str) -> RequestReco
         headers=safe_headers,
         body=request_body,
         response_status=value.get("response_status", 200),
-        response_headers={str(key): str(item) for key, item in response_headers.items()},
+        response_headers=_record_headers(response_headers),
         response_body=response_body,
     )
 
 
 def _normalize_record(record: RequestRecord) -> RequestRecord:
     """Normalize in-memory fixture bodies to the shared byte contract."""
+
+    _validate_record_shape(record.headers)
+    _validate_record_shape(record.response_headers)
+    safe_headers = _record_headers(record.headers)
+    safe_response_headers = _record_headers(record.response_headers)
+    _validate_record_shape(record.body)
+    _validate_record_shape(record.response_body)
 
     def body_bytes(value: object) -> bytes | None:
         if value is None:
@@ -193,10 +243,10 @@ def _normalize_record(record: RequestRecord) -> RequestRecord:
         identity=record.identity,
         method=record.method,
         url=record.url,
-        headers=record.headers,
+        headers=safe_headers,
         body=body_bytes(record.body),
         response_status=record.response_status,
-        response_headers=record.response_headers,
+        response_headers=safe_response_headers,
         response_body=body_bytes(record.response_body),
     )
 
@@ -243,6 +293,7 @@ def _load_identity_records(identity: IdentityInput) -> list[RequestRecord]:
         OSError,
         UnicodeDecodeError,
         json.JSONDecodeError,
+        RecursionError,
         CaptureError,
         TypeError,
         ValueError,
@@ -344,7 +395,7 @@ def run_pipeline(
     report_dir: str | Path = "reports",
     *,
     limits: ExecutorLimits | None = None,
-    now: datetime | None = None,
+    now: datetime | Callable[[], datetime] | None = None,
     mode: ProbeMode = ProbeMode.READ,
 ) -> PipelineResult:
     """Run one fully scoped, deterministic engagement.
@@ -354,9 +405,21 @@ def run_pipeline(
     loaded from the third element. New callers should use :class:`IdentityInput`.
     """
 
-    clock = now or datetime.now(UTC)
+    if callable(now):
+        clock = now
+    elif now is not None:
+        fixed_now = now
+
+        def clock() -> datetime:
+            return fixed_now
+
+    else:
+        def clock() -> datetime:
+            return datetime.now(UTC)
+
+    initial_now = clock()
     try:
-        guard = ScopeGuard.from_file(scope_path, now=clock)
+        guard = ScopeGuard.from_file(scope_path, now=initial_now)
     except ScopeError as error:
         raise PipelineError("target is outside the confirmed scope") from error
     if mode is not ProbeMode.READ:
@@ -385,7 +448,7 @@ def run_pipeline(
             raise PipelineError("traffic record count exceeds the safety limit")
         for record in records:
             try:
-                decision = guard.require_allowed(record.url, record.method, now=clock)
+                decision = guard.require_allowed(record.url, record.method, now=clock())
             except ScopeError as error:
                 raise PipelineError(
                     f"traffic for {identity.name!r} is outside the confirmed scope"
@@ -439,7 +502,7 @@ def run_pipeline(
     base = urlsplit(base_url)
     scoped_base = urlunsplit((base.scheme, base.netloc, first_path, "", ""))
     try:
-        guard.require_allowed(scoped_base, "GET", now=clock)
+        guard.require_allowed(scoped_base, "GET", now=clock())
     except ScopeError as error:
         raise PipelineError("target is outside the confirmed scope") from error
 

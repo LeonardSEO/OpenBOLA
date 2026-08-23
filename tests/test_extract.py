@@ -68,6 +68,23 @@ def test_bearer_normalization_removes_repeated_prefixes() -> None:
     assert vault.resolve(result.credential_refs[0]) == "opaque-token-value"
 
 
+def test_structurally_redacted_transport_values_are_not_credentials() -> None:
+    record = RequestRecord(
+        identity="alice",
+        method="GET",
+        url="https://example.test/me",
+        headers={
+            "Authorization": "[REDACTED]",
+            "Cookie": "[REDACTED]",
+            "X-API-Key": "[REDACTED]",
+        },
+    )
+
+    result = extract_requests([record], CredentialVault())
+
+    assert result.credential_refs == ()
+
+
 def test_malformed_jwt_is_not_a_hint_or_an_error() -> None:
     malformed = "eyJhbGciOiJub25lIn0.not-valid-json.signature"
     record = RequestRecord(

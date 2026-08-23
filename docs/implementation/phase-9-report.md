@@ -14,8 +14,10 @@
   references. HAR response bodies are intentionally absent, so HAR-only scans
   report zero executable ownership with an explicit skip reason. It has no
   mutation flag; writes remain available only through the explicit phase-5
-  mutation API with its canary/cleanup contract. `--json` emits a bounded
-  machine-safe summary without object IDs, request URLs, tokens, or bodies.
+  mutation API with its canary/cleanup contract. Records are additionally
+  bounded by depth, node, string, header, and body limits before conversion or
+  serialization. `--json` emits a bounded machine-safe summary without object
+  IDs, request URLs, tokens, or bodies.
 - Added `MockTarget`, a deterministic `ThreadingHTTPServer` bound explicitly
   to `127.0.0.1` and an ephemeral port. `/api/documents/{id}` is deliberately
   vulnerable while `/api/secure/{id}` enforces the owner mapping.
@@ -30,7 +32,7 @@
 
 ```text
 uv run pytest tests/test_e2e.py tests/test_cli.py -q
-10 passed
+12 passed
 
 uv run ruff check src/bola_checker/pipeline.py src/bola_checker/mock_target.py \
   src/bola_checker/cli.py tests/test_e2e.py tests/test_cli.py
@@ -44,7 +46,7 @@ uv run bolacheck --help
 Commands: scan
 
 uv run pytest -q
-219 passed
+244 passed
 
 uv run ruff check .
 All checks passed!
@@ -53,5 +55,5 @@ uv run mypy src
 Success: no issues found in 15 source files
 ```
 
-The full repository suite and final cross-phase type check remain the
-integration gate after all phase agents have landed their changes.
+The Phase 9-focused suite, full repository suite, Ruff, and mypy all pass in
+the final shared-worktree snapshot.

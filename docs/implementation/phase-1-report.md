@@ -18,8 +18,8 @@
   trusted directory descriptor.
 - `parse_har_records` reads at most the configured byte limit, validates the
   HAR envelope and each required request/response field, then converts entries
-  to shared `RequestRecord` values. Header and body material is retained only
-  in `RequestRecord` fields excluded from `repr`, for phase 2 extraction.
+  to shared `RequestRecord` values containing only the bounded structural
+  redaction contract described below.
 
 ## Evidence
 
@@ -91,3 +91,54 @@ output.
 Validation run: `uv run ruff check src/bola_checker/capture.py
 tests/test_capture.py` passed; `uv run mypy src/bola_checker/capture.py` passed;
 `uv run pytest -q tests/test_capture.py` passed with 17 tests.
+
+## Fix round 5: fail-closed persistent structure
+
+Capture no longer relies on a credential-name denylist. The HAR persistence
+boundary rebuilds every collector entry from an explicit schema, so an injected
+collector extension, response body, cookie array, or other unrecognized field
+cannot bypass the sanitizer. Header names remain as structure, but only a
+validated and parameter-free `Content-Type` media type and bounded sanitized
+`Location`/`Content-Location` URL can retain values. Every other header value,
+including custom `X-Auth` and `X-Session` values, is `[REDACTED]`. `Link`,
+`Refresh`, cookies, response bodies, and arbitrary response content are not
+retained. URL-bearing allowlisted headers accept only HTTP(S), origin-relative,
+or protocol-relative URLs without userinfo; fragments are removed and every
+query value is redacted.
+
+Request URLs retain the HTTP(S) scheme, host, port, path, and query field names
+needed for endpoint discovery, while every query value and the fragment are
+removed. JSON media types, including `application/*+json`, retain only bounded
+object field names and list/object shape; strings, numbers, booleans, and null
+are all replaced with `[REDACTED]`. Non-JSON, malformed, over-limit, textual,
+and byte bodies become a single `[REDACTED]` value. The bounds are 10,000 HAR
+entries, 256 headers per direction, 16,384 URL characters, 256 query fields,
+a 1 MiB input body, JSON depth 32, 4,096 JSON nodes, and 256 characters per
+JSON/query field name. The configured HAR byte ceiling is also enforced before
+the secure descriptor-relative writer creates a temporary file.
+
+This boundary is deliberately structural redaction, not entropy scanning or a
+claim to detect arbitrary secrets. URL path segments, HTTP methods, header
+names, normalized media types, sanitized allowlisted URL paths, query names,
+and JSON field names are retained as structural labels; an operator must not
+put credentials in those positions. The regression suite
+uses custom sentinel values in `X-Auth`, `X-Session`, neutral query parameters,
+JSON `auth`/`session`/neutral fields, URL-bearing headers, collector extensions,
+and response content, then asserts that none occur anywhere in the emitted HAR
+bytes. It also covers common JSON MIME normalization, complete HAR 1.2 fields,
+and fail-closed body depth/node/byte and output-size limits. ScopeGuard routing
+and the anchored dirfd writer behavior remain covered by their existing tests.
+The Playwright context is created with Service Workers blocked before a page
+can exist, so context routing remains the sole browser HTTP(S) request path;
+the in-memory collector enforces the 10,000-entry ceiling while collecting as
+well as at serialization time. The extraction consumer ignores the canonical
+`[REDACTED]` transport placeholder instead of registering it as a replayable
+credential. Chromium is launched with `--no-proxy-server`, preventing an
+inherited system proxy from becoming an unchecked network peer outside the
+logical URL authorized by `ScopeGuard`; capture tests assert the complete
+browser launch contract.
+
+Validation run: targeted Ruff and mypy checks passed; `uv run pytest -q
+tests/test_capture.py tests/test_extract.py` passed with 37 tests. Repository-wide
+`uv run ruff check .` and `uv run mypy src` passed; `uv run pytest` passed all
+244 tests in the final shared-worktree gate.

@@ -225,3 +225,48 @@ def test_cli_json_rejects_missing_or_symlinked_database_parent(tmp_path: Path) -
     linked = runner.invoke(app, [*common, "--db", str(link / "state.db")])
     assert linked.exit_code == 2
     assert json.loads(linked.stdout) == {"ok": False, "error": "scan_denied"}
+
+
+def test_cli_json_rejects_deep_records_without_traceback(tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+    nested: object = "leaf"
+    for _ in range(40):
+        nested = {"nested": nested}
+    payload = [
+        {
+            "url": "http://127.0.0.1:8899/api/documents/812",
+            "method": "GET",
+            "headers": {},
+            "response_status": 200,
+            "response_body": nested,
+        }
+    ]
+    alice, bob = root / "alice.json", root / "bob.json"
+    alice.write_text(json.dumps(payload), encoding="utf-8")
+    bob.write_text(json.dumps(payload), encoding="utf-8")
+    result = CliRunner().invoke(
+        app,
+        [
+            "scan",
+            "--scope",
+            str(_scope(root / "scope.yaml")),
+            "--base-url",
+            "http://127.0.0.1:8899",
+            "--identity",
+            f"alice={alice}",
+            "--identity",
+            f"bob={bob}",
+            "--credential",
+            "alice=BOLA_ALICE_TOKEN",
+            "--credential",
+            "bob=BOLA_BOB_TOKEN",
+            "--db",
+            str(root / "state.db"),
+            "--report-dir",
+            str(root / "reports"),
+            "--json",
+        ],
+        env={"BOLA_ALICE_TOKEN": "runtime-a", "BOLA_BOB_TOKEN": "runtime-b"},
+    )
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == {"ok": False, "error": "scan_denied"}

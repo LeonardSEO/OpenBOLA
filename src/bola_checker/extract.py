@@ -29,6 +29,7 @@ _API_KEY_HEADERS = frozenset(
         "x-session-token",
     }
 )
+_REDACTED_TRANSPORT_VALUE = "[REDACTED]"
 _SECRET_BODY_FIELD = re.compile(
     r"[\"']?(api[_-]?key|access[_-]?token|secret|bearer|auth[_-]?token|client[_-]?secret)"
     r"[\"']?\s*[:=]\s*[\"']?([^\s\"';,}\]]{8,})",
@@ -134,6 +135,8 @@ def _extract_header(
     seen_references: set[CredentialRef],
     hints: list[IdentityHint],
 ) -> None:
+    if value.strip() == _REDACTED_TRANSPORT_VALUE:
+        return
     normalized_name = name.casefold()
     if normalized_name == "authorization":
         bearer = _normalize_bearer(value)

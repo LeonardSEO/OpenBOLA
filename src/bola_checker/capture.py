@@ -1,4 +1,4 @@
-"""Secret-safe browser capture and bounded HAR import for phase 1."""
+"""Fail-closed structural browser capture and bounded HAR import for phase 1."""
 
 from __future__ import annotations
 
@@ -20,11 +20,23 @@ from bola_checker.scope import ScopeDecision, ScopeError, ScopeGuard
 
 DEFAULT_MAX_HAR_BYTES = 25 * 1024 * 1024
 _REDACTED = "[REDACTED]"
-_SENSITIVE_NAME = re.compile(
-    r"(?:authorization|cookie|token|api[-_]?key|secret|password|code|signature|credential|x-amz-)",
-    re.I,
-)
-_URL_HEADERS = frozenset({"location", "referer", "content-location"})
+_MAX_CAPTURE_ENTRIES = 10_000
+_MAX_URL_CHARS = 16_384
+_MAX_QUERY_FIELDS = 256
+_MAX_HEADER_COUNT = 256
+_MAX_HEADER_NAME_CHARS = 256
+_MAX_HEADER_VALUE_CHARS = 16_384
+_MAX_BODY_BYTES = 1024 * 1024
+_MAX_JSON_DEPTH = 32
+_MAX_JSON_NODES = 4_096
+_MAX_JSON_KEY_CHARS = 256
+_HTTP_TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")
+_MEDIA_TYPE = re.compile(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+\Z")
+_URL_HEADERS = frozenset({"location", "content-location"})
+
+
+class _StructuralLimitExceeded(ValueError):
+    """Raised internally when structural JSON retention exceeds safe bounds."""
 
 
 class CaptureError(ValueError):
@@ -62,12 +74,17 @@ class InMemoryEventCollector:
     """Retain only sanitized event metadata; never a raw HAR or response body."""
 
     _entries: dict[int, dict[str, Any]] = field(default_factory=dict)
+    _limit_exceeded: bool = False
 
     def attach(self, context: Any) -> None:
         context.on("request", self._on_request)
         context.on("response", self._on_response)
 
     def _on_request(self, request: Any) -> None:
+        request_id = id(request)
+        if request_id not in self._entries and len(self._entries) >= _MAX_CAPTURE_ENTRIES:
+            self._limit_exceeded = True
+            return
         headers = dict(request.headers)
         request_data: dict[str, Any] = {
             "method": str(request.method),
@@ -81,7 +98,7 @@ class InMemoryEventCollector:
                 "mimeType": _request_mime_type(headers, raw_post_data),
                 "text": post_data.decode("utf-8", errors="replace"),
             }
-        self._entries[id(request)] = {
+        self._entries[request_id] = {
             "request": request_data,
             "response": {"status": 0, "headers": [], "content": {}},
         }
@@ -96,6 +113,8 @@ class InMemoryEventCollector:
             }
 
     async def entries(self) -> list[dict[str, Any]]:
+        if self._limit_exceeded:
+            raise CaptureError("capture exceeds the safe entry count limit")
         return list(self._entries.values())
 
 
@@ -114,9 +133,12 @@ async def capture_har(
     active_collector = collector or InMemoryEventCollector()
     policy_failures: list[ScopeError] = []
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=config.headless)
+        browser = await playwright.chromium.launch(
+            headless=config.headless,
+            args=["--no-proxy-server"],
+        )
         try:
-            context = await browser.new_context()
+            context = await browser.new_context(service_workers="block")
             try:
                 await context.route("**/*", _scoped_route(scope_guard, policy_failures))
                 active_collector.attach(context)
@@ -131,14 +153,19 @@ async def capture_har(
     if policy_failures:
         raise CaptureError("a browser request was denied by the confirmed scope")
     output_path = _validated_output_path(config.capture_root, config.output_path)
-    _write_sanitized_har(config.capture_root, config.output_path, entries)
+    _write_sanitized_har(
+        config.capture_root,
+        config.output_path,
+        entries,
+        max_bytes=config.max_har_bytes,
+    )
     return output_path
 
 
 def parse_har_records(
     path: Path, identity: str, *, max_bytes: int = DEFAULT_MAX_HAR_BYTES
 ) -> list[RequestRecord]:
-    """Import a bounded HAR, redacting all secret material before retention."""
+    """Import a bounded HAR into the structural redaction contract."""
     if not identity.strip() or max_bytes <= 0:
         raise CaptureError("identity must not be empty and max_bytes must be positive")
     if not path.is_file() or path.is_symlink():
@@ -152,13 +179,15 @@ def parse_har_records(
         raise CaptureError("HAR file exceeds the configured size limit")
     try:
         document: Any = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise CaptureError("HAR file is not valid JSON") from exc
     if not isinstance(document, Mapping) or not isinstance(document.get("log"), Mapping):
         raise CaptureError("HAR log must be an object")
     entries = document["log"].get("entries")
     if not isinstance(entries, list):
         raise CaptureError("HAR log.entries must be a list")
+    if len(entries) > _MAX_CAPTURE_ENTRIES:
+        raise CaptureError("HAR log.entries exceeds the safe count limit")
     return [_entry_to_record(entry, identity) for entry in entries]
 
 
@@ -194,9 +223,19 @@ def _validated_output_path(root: Path, relative: Path) -> Path:
 
 
 def _write_sanitized_har(
-    root: Path, relative: Path, entries: list[dict[str, Any]]
+    root: Path,
+    relative: Path,
+    entries: list[dict[str, Any]],
+    *,
+    max_bytes: int = DEFAULT_MAX_HAR_BYTES,
 ) -> None:
     """Atomically write below an anchored root without traversing a writable path."""
+    if max_bytes <= 0:
+        raise CaptureError("sanitized HAR size limit must be positive")
+    serialized = json.dumps(_har_document(entries), separators=(",", ":"))
+    if len(serialized.encode("utf-8")) > max_bytes:
+        raise CaptureError("sanitized HAR exceeds the configured size limit")
+
     directory_fds: list[int] = []
     parent_fd: int | None = None
     temp_fd: int | None = None
@@ -213,7 +252,7 @@ def _write_sanitized_har(
         output = os.fdopen(temp_fd, "w", encoding="utf-8")
         temp_fd = None
         with output:
-            json.dump(_har_document(entries), output, separators=(",", ":"))
+            output.write(serialized)
             output.flush()
             os.fsync(output.fileno())
 
@@ -288,12 +327,13 @@ def _entry_to_record(entry: Any, identity: str) -> RequestRecord:
         raise CaptureError("HAR response.status must be an integer between 0 and 999")
     request_headers = _headers_from_har(request.get("headers"), "request")
     response_headers = _headers_from_har(response.get("headers"), "response")
+    body_headers = _headers_with_post_data_mime(request_headers, request.get("postData"))
     return RequestRecord(
         identity,
         method,
         _sanitize_url(url),
         _sanitize_header_mapping(request_headers),
-        _sanitize_body(_post_data(request.get("postData")), request_headers),
+        _sanitize_body(_post_data(request.get("postData")), body_headers),
         status,
         _sanitize_header_mapping(response_headers),
         None,
@@ -301,14 +341,21 @@ def _entry_to_record(entry: Any, identity: str) -> RequestRecord:
 
 
 def _validate_har_url(url: str) -> None:
-    parsed = urlsplit(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None:
-        raise CaptureError("HAR request.url must be an absolute HTTP(S) URL without credentials")
+    try:
+        _sanitize_url(url)
+    except CaptureError as exc:
+        raise CaptureError(
+            "HAR request.url must be an absolute HTTP(S) URL without credentials"
+        ) from exc
+    else:
+        return
 
 
 def _headers_from_har(value: Any, location: str) -> dict[str, str]:
     if not isinstance(value, list):
         raise CaptureError(f"HAR {location}.headers must be a list")
+    if len(value) > _MAX_HEADER_COUNT:
+        raise CaptureError(f"HAR {location}.headers exceeds the safe count limit")
     headers: dict[str, str] = {}
     for item in value:
         if (
@@ -317,23 +364,53 @@ def _headers_from_har(value: Any, location: str) -> dict[str, str]:
             or not isinstance(item.get("value"), str)
         ):
             raise CaptureError(f"HAR {location}.headers entries require string name and value")
-        headers[item["name"]] = item["value"]
+        name, item_value = item["name"], item["value"]
+        assert isinstance(name, str) and isinstance(item_value, str)
+        _validate_header_name(name)
+        headers[name] = item_value
     return headers
 
 
+def _headers_with_post_data_mime(
+    headers: Mapping[str, str], post_data: Any
+) -> dict[str, str]:
+    """Include a safe HAR ``postData.mimeType`` as Content-Type metadata.
+
+    HAR stores the request body MIME separately from request headers.  The
+    sanitizer uses the merged view when deciding whether a body can be
+    retained structurally; only a validated media type is copied.
+    """
+    merged = dict(headers)
+    if isinstance(post_data, Mapping):
+        mime_type = post_data.get("mimeType")
+        if isinstance(mime_type, str):
+            safe_mime = _safe_content_type(mime_type)
+            if safe_mime is not None and not any(
+                name.casefold() == "content-type" for name in merged
+            ):
+                merged["Content-Type"] = safe_mime
+    return merged
+
+
 def _headers_to_har(headers: Mapping[str, str]) -> list[dict[str, str]]:
-    return [
-        {"name": name, "value": _sanitize_header_value(name, value)}
-        for name, value in headers.items()
-    ]
+    if len(headers) > _MAX_HEADER_COUNT:
+        raise CaptureError("headers exceed the safe count limit")
+    output: list[dict[str, str]] = []
+    for name, value in headers.items():
+        if not isinstance(name, str) or not isinstance(value, str):
+            raise CaptureError("headers require string names and values")
+        _validate_header_name(name)
+        output.append({"name": name, "value": _sanitize_header_value(name, value)})
+    return output
+
+
+def _sanitize_har_headers(value: Any, location: str) -> list[dict[str, str]]:
+    return _headers_to_har(_headers_from_har(value, location))
 
 
 def _request_mime_type(headers: Mapping[str, str], body: bytes | str | None) -> str:
-    content_type = next(
-        (value.strip() for name, value in headers.items() if name.lower() == "content-type"),
-        "",
-    )
-    if content_type:
+    content_type = _content_type(headers)
+    if content_type is not None:
         return content_type
     if isinstance(body, bytes):
         return "application/octet-stream"
@@ -341,39 +418,81 @@ def _request_mime_type(headers: Mapping[str, str], body: bytes | str | None) -> 
 
 
 def _sanitize_header_mapping(headers: Mapping[str, str]) -> dict[str, str]:
+    if len(headers) > _MAX_HEADER_COUNT:
+        raise CaptureError("headers exceed the safe count limit")
     return {name: _sanitize_header_value(name, value) for name, value in headers.items()}
 
 
-def _sanitize_url(url: str) -> str:
-    parsed = urlsplit(url)
+def _sanitize_url(url: str, *, allow_relative: bool = False) -> str:
+    if len(url) > _MAX_URL_CHARS or any(
+        character == "\\" or character.isspace() or ord(character) < 32 for character in url
+    ):
+        raise CaptureError("URL exceeds safe structural bounds")
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise CaptureError("URL is not structurally valid") from exc
+
+    scheme = parsed.scheme.casefold()
+    if parsed.username is not None or parsed.password is not None:
+        raise CaptureError("URL userinfo is not retained")
+    if scheme:
+        if scheme not in {"http", "https"} or parsed.hostname is None:
+            raise CaptureError("URL must use HTTP(S)")
+    elif not allow_relative or (parsed.netloc == "" and not parsed.path.startswith("/")):
+        raise CaptureError("URL must be absolute or origin-relative")
+
     query_source = parsed.query.replace(";", "&")
-    query = urlencode(
-        [
-            (key, _REDACTED if _SENSITIVE_NAME.search(key) else value)
-            for key, value in parse_qsl(query_source, keep_blank_values=True)
-        ],
-        doseq=True,
-    )
+    if query_source and query_source.count("&") + 1 > _MAX_QUERY_FIELDS:
+        raise CaptureError("URL query exceeds the safe field count limit")
+    query_items = parse_qsl(query_source, keep_blank_values=True)
+    if any(len(key) > _MAX_JSON_KEY_CHARS for key, _ in query_items):
+        raise CaptureError("URL query name exceeds the safe length limit")
+    query = urlencode([(key, _REDACTED) for key, _ in query_items], doseq=True)
+
     host = parsed.hostname or ""
-    if parsed.port is not None:
-        host = f"{host}:{parsed.port}"
-    return urlunsplit((parsed.scheme, host, parsed.path, query, ""))
+    if ":" in host:
+        host = f"[{host}]"
+    if port is not None:
+        host = f"{host}:{port}"
+    return urlunsplit((scheme, host, parsed.path, query, ""))
 
 
 def _sanitize_header_value(name: str, value: str) -> str:
-    if _SENSITIVE_NAME.search(name):
-        return _REDACTED
-    if name.lower() in _URL_HEADERS:
-        return _sanitize_url(value)
-    if name.lower() == "link":
-        return re.sub(r"<([^>]*)>", lambda match: f"<{_sanitize_url(match.group(1))}>", value)
-    if name.lower() == "refresh":
-        return re.sub(
-            r"(?i)(\burl\s*=\s*)([^;]+)",
-            lambda match: match.group(1) + _sanitize_url(match.group(2).strip()),
-            value,
-        )
-    return value
+    _validate_header_name(name)
+    normalized_name = name.casefold()
+    if normalized_name == "content-type":
+        return _safe_content_type(value) or _REDACTED
+    if normalized_name in _URL_HEADERS and len(value) <= _MAX_HEADER_VALUE_CHARS:
+        try:
+            return _sanitize_url(value, allow_relative=True)
+        except CaptureError:
+            return _REDACTED
+    return _REDACTED
+
+
+def _validate_header_name(name: str) -> None:
+    if (
+        not name
+        or len(name) > _MAX_HEADER_NAME_CHARS
+        or _HTTP_TOKEN.fullmatch(name) is None
+    ):
+        raise CaptureError("header name is not a bounded HTTP token")
+
+
+def _safe_content_type(value: str) -> str | None:
+    if len(value) > _MAX_HEADER_VALUE_CHARS:
+        return None
+    media_type = value.partition(";")[0].strip().casefold()
+    return media_type if _MEDIA_TYPE.fullmatch(media_type) is not None else None
+
+
+def _content_type(headers: Mapping[str, str]) -> str | None:
+    for name, value in headers.items():
+        if name.casefold() == "content-type":
+            return _safe_content_type(value)
+    return None
 
 
 def _scoped_route(scope_guard: ScopeGuard, failures: list[ScopeError]) -> Any:
@@ -406,30 +525,63 @@ def _scoped_route(scope_guard: ScopeGuard, failures: list[ScopeError]) -> Any:
 
 
 def _har_document(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(entries) > _MAX_CAPTURE_ENTRIES:
+        raise CaptureError("capture exceeds the safe entry count limit")
     complete_entries: list[dict[str, Any]] = []
     for entry in entries:
-        request = dict(entry.get("request", {}))
-        response = dict(entry.get("response", {}))
-        request.setdefault("method", "GET")
-        request.setdefault("url", "about:blank")
-        request.setdefault("httpVersion", "HTTP/1.1")
-        request.setdefault("headers", [])
-        request.setdefault("queryString", [])
-        request.setdefault("cookies", [])
-        request.setdefault("headersSize", -1)
-        request.setdefault("bodySize", -1)
-        response.setdefault("status", 0)
-        response.setdefault("statusText", "")
-        response.setdefault("httpVersion", "HTTP/1.1")
-        response.setdefault("headers", [])
-        response.setdefault("cookies", [])
-        content = dict(response.get("content", {}))
-        content.setdefault("size", 0)
-        content.setdefault("mimeType", "")
-        response["content"] = content
-        response.setdefault("redirectURL", "")
-        response.setdefault("headersSize", -1)
-        response.setdefault("bodySize", -1)
+        if not isinstance(entry, Mapping):
+            raise CaptureError("capture entry must be an object")
+        request_source, response_source = entry.get("request"), entry.get("response")
+        if not isinstance(request_source, Mapping) or not isinstance(response_source, Mapping):
+            raise CaptureError("capture entry requires request and response objects")
+
+        method, url = request_source.get("method"), request_source.get("url")
+        if (
+            not isinstance(method, str)
+            or len(method) > 32
+            or _HTTP_TOKEN.fullmatch(method) is None
+            or not isinstance(url, str)
+        ):
+            raise CaptureError("capture request requires a bounded method and URL")
+        safe_url = _sanitize_url(url)
+
+        raw_request_headers = request_source.get("headers", [])
+        request_header_mapping = _headers_from_har(raw_request_headers, "request")
+        request_headers = _headers_to_har(request_header_mapping)
+        post_data = request_source.get("postData")
+        body_headers = _headers_with_post_data_mime(request_header_mapping, post_data)
+        raw_body = _post_data(post_data)
+        body = _sanitize_body(raw_body, body_headers)
+        request: dict[str, Any] = {
+            "method": method.upper(),
+            "url": safe_url,
+            "httpVersion": "HTTP/1.1",
+            "headers": request_headers,
+            "queryString": _query_string_to_har(safe_url),
+            "cookies": [],
+            "headersSize": -1,
+            "bodySize": -1,
+        }
+        if body is not None:
+            request["postData"] = {
+                "mimeType": _request_mime_type(body_headers, raw_body),
+                "text": body.decode("utf-8", errors="replace"),
+            }
+
+        status = response_source.get("status", 0)
+        if not isinstance(status, int) or isinstance(status, bool) or not 0 <= status <= 999:
+            raise CaptureError("capture response status must be an integer from 0 to 999")
+        response: dict[str, Any] = {
+            "status": status,
+            "statusText": "",
+            "httpVersion": "HTTP/1.1",
+            "headers": _sanitize_har_headers(response_source.get("headers", []), "response"),
+            "cookies": [],
+            "content": {"size": 0, "mimeType": ""},
+            "redirectURL": "",
+            "headersSize": -1,
+            "bodySize": -1,
+        }
         complete_entries.append(
             {
                 "startedDateTime": "1970-01-01T00:00:00Z",
@@ -467,28 +619,49 @@ def _post_data(value: Any) -> bytes | None:
     return text.encode()
 
 
+def _query_string_to_har(url: str) -> list[dict[str, str]]:
+    return [
+        {"name": key, "value": _REDACTED}
+        for key, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)
+    ]
+
+
 def _sanitize_body(value: bytes | str | None, headers: Mapping[str, str]) -> bytes | None:
     if value is None:
         return None
     body = value.encode() if isinstance(value, str) else value
-    content_type = next(
-        (item for name, item in headers.items() if name.lower() == "content-type"), ""
-    )
-    if "json" not in content_type.lower():
+    if len(body) > _MAX_BODY_BYTES:
+        return _REDACTED.encode()
+    content_type = _content_type(headers)
+    if content_type is None or not (
+        content_type.endswith("/json") or content_type.endswith("+json")
+    ):
         return _REDACTED.encode()
     try:
         decoded = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        redacted = _redact_json(decoded)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, _StructuralLimitExceeded):
         return _REDACTED.encode()
-    return json.dumps(_redact_json(decoded), separators=(",", ":")).encode()
+    return json.dumps(redacted, separators=(",", ":")).encode()
 
 
 def _redact_json(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {
-            str(key): _REDACTED if _SENSITIVE_NAME.search(str(key)) else _redact_json(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_json(item) for item in value]
-    return value
+    nodes = 0
+
+    def visit(item: Any, depth: int) -> Any:
+        nonlocal nodes
+        nodes += 1
+        if nodes > _MAX_JSON_NODES or depth > _MAX_JSON_DEPTH:
+            raise _StructuralLimitExceeded
+        if isinstance(item, Mapping):
+            output: dict[str, Any] = {}
+            for key, child in item.items():
+                if not isinstance(key, str) or len(key) > _MAX_JSON_KEY_CHARS:
+                    raise _StructuralLimitExceeded
+                output[key] = visit(child, depth + 1)
+            return output
+        if isinstance(item, list):
+            return [visit(child, depth + 1) for child in item]
+        return _REDACTED
+
+    return visit(value, 0)
