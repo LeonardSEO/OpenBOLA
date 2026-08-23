@@ -46,7 +46,7 @@ uv run bolacheck --help
 Commands: scan
 
 uv run pytest -q
-244 passed
+246 passed
 
 uv run ruff check .
 All checks passed!

@@ -42,7 +42,7 @@
 - `uv run pytest tests/test_executor.py`: 28 passed.
 - `uv run ruff check src/bola_checker/executor.py tests/test_executor.py`: passed.
 - `uv run mypy src/bola_checker/executor.py`: passed.
-- Final repository gate: `uv run pytest -q` — 244 passed; full Ruff and mypy
+- Final repository gate: `uv run pytest -q` — 246 passed; full Ruff and mypy
   passed for all 15 source files.
 
 All HTTP tests use `httpx.MockTransport`; no external network or live target is

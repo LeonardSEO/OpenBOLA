@@ -107,5 +107,5 @@ Python SQLite API does not accept an already-open file descriptor.
   passed.
 - `uv run pytest tests/test_state.py tests/test_endpoints.py`: 44 passed.
 - `uv run mypy src`: passed with no issues.
-- Final repository gate: `uv run pytest -q` — 244 passed; full Ruff and mypy
+- Final repository gate: `uv run pytest -q` — 246 passed; full Ruff and mypy
   passed.

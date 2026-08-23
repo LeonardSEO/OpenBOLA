@@ -335,7 +335,7 @@ uv run mypy src/bola_checker/state.py
 Success: no issues found in 1 source file
 
 uv run pytest -q
-244 passed
+246 passed
 
 uv run ruff check .
 All checks passed!
