@@ -42,6 +42,7 @@ from openbola.models import (
     Verdict,
 )
 from openbola.reporting import ReportBundle, write_reports
+from openbola.reports import write_run_manifest
 from openbola.scope import ScopeError, ScopeGuard
 from openbola.state import StateStore, canonical_finding_text, object_ref_fingerprint
 
@@ -461,6 +462,7 @@ def run_pipeline(
         all_records.extend(records)
 
     database_path = Path(db_path).absolute()
+    report_output_dir = Path(report_dir).absolute()
     if database_path.exists() or database_path.is_symlink():
         raise PipelineError(
             "state database already exists; start each scan with a new database path"
@@ -554,7 +556,14 @@ def run_pipeline(
     endpoints = {int(item["id"]): item for item in store.list_endpoints()}
     identities_by_id = {int(item["id"]): item for item in store.list_identities()}
     run_label = "run_" + hashlib.sha256(b"openbola-pipeline").hexdigest()
-    run_id = store.start_run(run_label)
+    run_metadata: dict[str, str] = {}
+    try:
+        report_directory_ref = report_output_dir.relative_to(database_path.parent)
+    except ValueError:
+        report_directory_ref = None
+    if report_directory_ref is not None and report_directory_ref.parts:
+        run_metadata["report_directory"] = "/".join(report_directory_ref.parts)
+    run_id = store.start_run(run_label, metadata=run_metadata)
     executor = ProbeExecutor(
         guard,
         vault,
@@ -650,7 +659,8 @@ def run_pipeline(
         ),
     )
     try:
-        report_paths = write_reports(bundle, output_dir=report_dir)
+        report_paths = write_reports(bundle, output_dir=report_output_dir)
+        write_run_manifest(report_output_dir, run_id=run_id, created_at=clock().isoformat())
     except (OSError, ValueError, RuntimeError) as error:
         raise PipelineError("report bundle could not be published atomically") from error
     return PipelineResult(

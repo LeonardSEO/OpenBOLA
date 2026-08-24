@@ -73,6 +73,9 @@ _SAFE_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _SAFE_SOURCE = re.compile(r"[A-Za-z][A-Za-z0-9_:-]*(?::[A-Za-z0-9_.$-]+)*\Z")
 _SAFE_PATH = re.compile(r"/(?:[A-Za-z0-9._~!$&'()*+,;:@{}-]+/?)*\Z")
 _LEGACY_SAFE_PATH = re.compile(r"/(?:[A-Za-z0-9._~!$&'()*+,;:@%{}-]+/?)*\Z")
+_SAFE_REPORT_DIRECTORY = re.compile(
+    r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\Z"
+)
 _ROUTE_PLACEHOLDER = re.compile(r"\{id(?:[2-9][0-9]*)?\}\Z")
 _UUID_LITERAL = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z",
@@ -529,6 +532,17 @@ def _validate_json_field(key: str, value: Any) -> Any:
             raise ValueError("persistent JSON label field must be a string")
         if not _OPAQUE_RUN_LABEL_REF.fullmatch(value):
             raise ValueError("persistent JSON run label is not an opaque reference")
+        return value
+    if key == "report_directory":
+        if (
+            not isinstance(value, str)
+            or len(value) > 512
+            or value.startswith(("/", "\\"))
+            or "\\" in value
+            or not _SAFE_REPORT_DIRECTORY.fullmatch(value)
+            or any(part in {".", ".."} for part in value.split("/"))
+        ):
+            raise ValueError("persistent JSON report directory is not a safe relative path")
         return value
     if key == "evidence":
         if not isinstance(value, Mapping):

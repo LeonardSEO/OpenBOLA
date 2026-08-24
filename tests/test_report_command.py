@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 from test_reporting import _bundle
+from typer.testing import CliRunner
 
+from openbola.cli import app
 from openbola.reporting import write_reports
 from openbola.reports import (
     MANIFEST_FILENAME,
@@ -107,6 +109,40 @@ def test_loader_rejects_symlinks_non_private_artifacts_and_secret_sentinels(tmp_
     assert private.value.code == "path_not_private"
 
 
+def test_loader_rejects_unknown_nested_fields_and_non_private_ancestor(
+    tmp_path: Path,
+) -> None:
+    root = _private(tmp_path / "data")
+    nested = root / "nested"
+    nested.mkdir()
+    nested.chmod(0o755)
+    directory = nested / "run"
+    write_reports(_bundle(), output_dir=directory)
+    write_run_manifest(directory, run_id=7, created_at="2026-08-24T12:00:00+00:00")
+    with pytest.raises(ReportError) as private:
+        ReportLocator().resolve(
+            "nested/run", db_path=_db(tmp_path / "state.db", run_id=7), data_root=root
+        )
+    assert private.value.code == "path_not_private"
+
+    nested.chmod(0o700)
+    payload = json.loads((directory / "report.json").read_text(encoding="utf-8"))
+    payload["findings"][0]["unexpected"] = "value"
+    (directory / "report.json").write_text(json.dumps(payload), encoding="utf-8")
+    (directory / "report.json").chmod(0o600)
+    with pytest.raises(ReportError) as unknown:
+        load_published_report(directory)
+    assert unknown.value.code == "report_schema_mismatch"
+
+    payload = json.loads((directory / "report.json").read_text(encoding="utf-8"))
+    payload["findings"][0]["evidence"]["cleanup"] = []
+    (directory / "report.json").write_text(json.dumps(payload), encoding="utf-8")
+    (directory / "report.json").chmod(0o600)
+    with pytest.raises(ReportError) as malformed:
+        load_published_report(directory)
+    assert malformed.value.code == "report_schema_mismatch"
+
+
 @pytest.mark.parametrize("format_name", ["json", "html", "junit", "markdown", "csv", "sarif"])
 def test_every_p7_artifact_is_reopened_without_returning_raw_text(
     tmp_path: Path, format_name: str
@@ -146,3 +182,69 @@ def test_locator_rejects_traversal_and_outside_absolute_path(tmp_path: Path) -> 
     with pytest.raises(ReportError) as outside:
         ReportLocator().resolve(str(tmp_path / "outside"), db_path=db_path, data_root=root)
     assert outside.value.code == "path_denied"
+
+
+def test_manifest_publication_is_no_replace_and_cleans_stage(tmp_path: Path) -> None:
+    root = _private(tmp_path / "data")
+    directory = _published(root)
+    with pytest.raises(ReportError) as duplicate:
+        write_run_manifest(directory, run_id=7, created_at="2026-08-24T12:00:00+00:00")
+    assert duplicate.value.code == "manifest_exists"
+    assert not (directory / ".manifest.json.stage").exists()
+
+
+def test_report_cli_returns_only_safe_summary_and_artifact_metadata(tmp_path: Path) -> None:
+    root = _private(tmp_path / "data")
+    _published(root)
+    db_path = _db(tmp_path / "state.db")
+    result = CliRunner().invoke(
+        app,
+        [
+            "report",
+            "7",
+            "--db",
+            str(db_path),
+            "--data-root",
+            str(root),
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["artifact"] == "report.json"
+    assert payload["summary"]["bola"] == 1
+    assert "outcomes" not in payload
+
+
+def test_sarif_and_html_unknown_or_malformed_content_fails_closed(tmp_path: Path) -> None:
+    root = _private(tmp_path / "data")
+    directory = _published(root)
+    sarif = json.loads((directory / "report.sarif").read_text(encoding="utf-8"))
+    sarif["runs"][0]["unexpected"] = "value"
+    (directory / "report.sarif").write_text(json.dumps(sarif), encoding="utf-8")
+    (directory / "report.sarif").chmod(0o600)
+    with pytest.raises(ReportError) as sarif_error:
+        load_published_report(directory / "report.sarif")
+    assert sarif_error.value.code == "report_schema_mismatch"
+
+    directory = _published(root, run_id=8)
+    (directory / "report.html").write_text(
+        "<!doctype html><html><body><p>unclosed</body></html>", encoding="utf-8"
+    )
+    (directory / "report.html").chmod(0o600)
+    with pytest.raises(ReportError) as html_error:
+        load_published_report(directory / "report.html")
+    assert html_error.value.code == "report_malformed"
+
+
+def test_stale_manifest_is_rejected_when_artifacts_are_newer(tmp_path: Path) -> None:
+    root = _private(tmp_path / "data")
+    directory = _published(root)
+    manifest = json.loads((directory / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    manifest["created_at"] = "2000-01-01T00:00:00+00:00"
+    (directory / MANIFEST_FILENAME).write_text(json.dumps(manifest), encoding="utf-8")
+    (directory / MANIFEST_FILENAME).chmod(0o600)
+    with pytest.raises(ReportError) as stale:
+        load_published_report(directory)
+    assert stale.value.code == "manifest_stale"

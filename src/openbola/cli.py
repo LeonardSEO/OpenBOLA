@@ -13,9 +13,49 @@ from rich.console import Console
 from openbola import __version__
 from openbola.mcp_server import MCPServiceError, create_mcp_server
 from openbola.pipeline import IdentityInput, PipelineError, PipelineResult, run_pipeline
+from openbola.reports import (
+    ARTIFACT_FILENAMES,
+    ReportError,
+    ReportLocator,
+    load_published_report,
+)
+from openbola.updates import UpdateResult, apply_update, check_for_update
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 console = Console()
+_SAFE_UPDATE_REASONS = frozenset(
+    {
+        "archive_invalid",
+        "archive_members_invalid",
+        "archive_too_large",
+        "artifact_missing",
+        "artifact_too_large",
+        "cache_untrusted",
+        "checksum_duplicate",
+        "checksum_malformed",
+        "checksum_missing",
+        "checksum_too_large",
+        "confirmation_required",
+        "data_root_unavailable",
+        "digest_mismatch",
+        "download_failed",
+        "download_malformed",
+        "executable_invalid",
+        "invalid_version",
+        "malformed_release",
+        "redirect_denied",
+        "release_unavailable",
+        "replacement_failed",
+        "manifest_mismatch",
+        "scope_denied",
+        "scope_peer_pinning_unsupported",
+        "scope_required",
+        "size_mismatch",
+        "unsupported_platform",
+        "update_failed",
+        "url_denied",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +76,36 @@ def _emit_command_error(code: str, *, json_output: bool) -> NoReturn:
     else:
         console.print("[bold red]commando geweigerd[/bold red]")
     raise typer.Exit(code=2)
+
+
+def _emit_update_result(result: UpdateResult, *, json_output: bool) -> None:
+    """Render only the updater protocol and map denied states to exit 2."""
+
+    ok = result.status in {"current", "available", "updated"}
+    details: dict[str, str | int | bool] = {
+        "ok": ok,
+        "status": result.status,
+        "current_version": result.current_version,
+    }
+    if not ok:
+        details["error"] = "update_denied"
+    if result.candidate_version is not None:
+        details["candidate_version"] = result.candidate_version
+    if result.reason_code in _SAFE_UPDATE_REASONS:
+        details["reason_code"] = result.reason_code
+    if json_output:
+        typer.echo(json.dumps(details, sort_keys=True, separators=(",", ":")))
+    elif ok:
+        if result.status == "updated":
+            console.print(f"[green]OpenBOLA bijgewerkt naar {result.candidate_version}[/green]")
+        elif result.status == "available":
+            console.print(f"[yellow]Update beschikbaar: {result.candidate_version}[/yellow]")
+        else:
+            console.print(f"[green]OpenBOLA is actueel ({result.current_version})[/green]")
+    else:
+        console.print("[bold red]update geweigerd[/bold red]")
+    if not ok:
+        raise typer.Exit(code=2)
 
 
 def _version_callback(value: bool) -> None:
@@ -160,11 +230,52 @@ def report_command(
     run: Annotated[str, typer.Argument()],
     json_output: Annotated[bool, typer.Option("--json")] = False,
     format_name: Annotated[str, typer.Option("--format")] = "json",
+    db: Annotated[Path, typer.Option("--db")] = Path("bola_state.db"),
+    data_root: Annotated[Path | None, typer.Option("--data-root")] = None,
 ) -> None:
     """Reopen an existing sanitized report run."""
 
-    del run, format_name
-    _emit_command_error("report_denied", json_output=json_output)
+    normalized_format = format_name.casefold()
+    if normalized_format not in ARTIFACT_FILENAMES:
+        _emit_command_error("report_denied", json_output=json_output)
+    try:
+        database_path = db.absolute()
+        root = (data_root if data_root is not None else database_path.parent).absolute()
+        resolved = ReportLocator().resolve(run, db_path=database_path, data_root=root)
+        directory = resolved if resolved.is_dir() else resolved.parent
+        artifact = directory / ARTIFACT_FILENAMES[normalized_format]
+        loaded = load_published_report(artifact)
+        details: dict[str, object] = {
+            "artifact": artifact.name,
+            "format": normalized_format,
+        }
+        if isinstance(loaded, dict) and normalized_format == "json":
+            summary = loaded.get("summary")
+            scope = loaded.get("scope")
+            if isinstance(summary, dict):
+                details["summary"] = {
+                    key: summary[key]
+                    for key in ("bola", "executed", "inconclusive", "protected", "skipped")
+                    if key in summary and isinstance(summary[key], int)
+                }
+            if isinstance(scope, dict) and isinstance(scope.get("target_label"), str):
+                details["target_label"] = scope["target_label"]
+        else:
+            details.update(
+                {key: value for key, value in loaded.items() if key in {"size", "filename"}}
+            )
+        if json_output:
+            typer.echo(json.dumps({"ok": True, **details}, sort_keys=True, separators=(",", ":")))
+            return
+        console.print(f"[cyan]>[/cyan] sanitized report: {artifact.name}")
+        if "target_label" in details:
+            console.print(f"  [dim]->[/dim] target: {details['target_label']}")
+        summary = details.get("summary")
+        if isinstance(summary, dict):
+            for key, value in summary.items():
+                console.print(f"  [dim]->[/dim] {key}: {value}")
+    except (ReportError, OSError, ValueError, TypeError):
+        _emit_command_error("report_denied", json_output=json_output)
 
 
 @app.command("update")
@@ -175,9 +286,17 @@ def update_command(
     force_check: Annotated[bool, typer.Option("--force-check")] = False,
 ) -> None:
     """Check for or explicitly apply a verified release update."""
-
-    del check, yes, force_check
-    _emit_command_error("update_denied", json_output=json_output)
+    try:
+        result = (
+            check_for_update(force_check=force_check)
+            if check
+            else apply_update(confirm=yes)
+        )
+    except Exception as error:
+        # Never expose transport, filesystem, URL, or release-body details.
+        del error
+        _emit_command_error("update_denied", json_output=json_output)
+    _emit_update_result(result, json_output=json_output)
 
 
 @app.command("mcp")

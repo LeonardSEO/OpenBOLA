@@ -14,6 +14,7 @@ from openbola import __version__
 from openbola.cli import app
 from openbola.mcp_server import MCPServiceError
 from openbola.mock_target import DEMO_OBJECT_ID, MockTarget
+from openbola.updates import UpdateResult
 
 
 def _scope(path: Path) -> Path:
@@ -339,3 +340,56 @@ def test_mcp_command_maps_optional_or_transport_failures_to_safe_error(
     assert json.loads(result.stdout) == {"ok": False, "error": "mcp_unavailable"}
     assert "MCP_SECRET_SENTINEL" not in result.stdout
     assert "local path" not in result.stdout
+
+
+def test_update_check_maps_bounded_available_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli_module,
+        "check_for_update",
+        lambda *, force_check: UpdateResult("available", "0.1.0", "0.1.1"),
+    )
+    result = CliRunner().invoke(app, ["update", "--check", "--json", "--force-check"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "candidate_version": "0.1.1",
+        "current_version": "0.1.0",
+        "ok": True,
+        "status": "available",
+    }
+
+
+def test_update_apply_maps_denial_without_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "RELEASE_RESPONSE_SECRET_SENTINEL"
+    monkeypatch.setattr(
+        cli_module,
+        "apply_update",
+        lambda *, confirm: UpdateResult("denied", "0.1.0", "0.1.1", sentinel),
+    )
+    result = CliRunner().invoke(app, ["update", "--json"])
+    assert result.exit_code == 2
+    document = json.loads(result.stdout)
+    assert document["ok"] is False
+    assert document["error"] == "update_denied"
+    assert sentinel not in result.stdout
+
+
+def test_update_service_exception_is_generic_in_both_output_modes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "LOCAL_UPDATE_SECRET_SENTINEL"
+
+    def fail(*, confirm: bool) -> UpdateResult:
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(cli_module, "apply_update", fail)
+    json_result = CliRunner().invoke(app, ["update", "--yes", "--json"])
+    rich_result = CliRunner().invoke(app, ["update", "--yes"])
+    assert json_result.exit_code == 2
+    assert rich_result.exit_code == 2
+    assert json.loads(json_result.stdout) == {"ok": False, "error": "update_denied"}
+    assert sentinel not in json_result.stdout
+    assert sentinel not in rich_result.stdout
