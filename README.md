@@ -323,6 +323,10 @@ discovery, a confirmed local BOLA read, an explicitly granted reversible
 `PATCH`, restore verification, and the six-artifact report summary. It contains
 opaque placeholders only; it is not evidence about an external target.
 
+The matching [offline social-preview artwork](docs/assets/openbola-social-preview.svg)
+is a checked-in SVG derivative and does not load remote fonts, images, scripts,
+or tracking pixels.
+
 ## Roadmap and release status
 
 The detailed [v1 roadmap](docs/superpowers/plans/2026-08-24-openbola-v1-roadmap.md)

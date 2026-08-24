@@ -95,6 +95,7 @@ def test_readme_launch_contract_is_complete_and_secret_free() -> None:
         assert install_example in readme
 
     assert "examples/demo/openbola-demo.cast" in readme
+    assert "docs/assets/openbola-social-preview.svg" in readme
     for artifact in (
         "report.html",
         "report.csv",
