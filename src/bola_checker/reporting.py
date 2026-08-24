@@ -479,7 +479,7 @@ def generate_sarif_report(bundle: ReportBundle) -> str:
                 "tool": {
                     "driver": {
                         "name": "BOLACheck",
-                        "informationUri": "https://github.com/symbis/bolacheck",
+                        "informationUri": "https://github.com/LeonardSEO/bolacheck",
                         "rules": rules,
                     }
                 },
