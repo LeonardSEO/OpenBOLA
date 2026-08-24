@@ -185,3 +185,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
 - P5 Task 1 implementation is committed as `da2d223` (report finalized in
   `2841e48`): typed AI contracts and bounded privacy-safe context. Local tests
   34 passed with Ruff and strict mypy; independent review is pending.
+- P5 Task 1 independently approved: immutable bounded contracts, exact
+  context allowlist, endpoint safety, deterministic sorting/dedup, and no
+  handle/secret resolution all pass. Task 2 strict proposal parsing/binding
+  may begin.
