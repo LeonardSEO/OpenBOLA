@@ -34,6 +34,48 @@ _MAX_MARKER_BYTES = 4096
 _MAX_VERSION_LENGTH = 64
 _MAX_CODE_LENGTH = 64
 _EXPECTED_STATE_SCHEMA = 3
+_PROBE_CODES = frozenset(
+    {
+        "probe_unavailable",
+        "platform_supported",
+        "localappdata_missing",
+        "platform_unsupported",
+        "data_root_ready",
+        "data_root_missing",
+        "data_root_symlink",
+        "data_root_not_private",
+        "data_root_unreadable",
+        "data_root_unavailable",
+        "package_ready",
+        "package_version_missing",
+        "package_version_invalid",
+        "browser_ready",
+        "browser_unavailable",
+        "browser_dependency_missing",
+        "browser_not_ready",
+        "vault_ready",
+        "vault_unavailable",
+        "state_ready",
+        "state_path_unavailable",
+        "state_symlink",
+        "state_parent_symlink",
+        "state_missing",
+        "state_not_private",
+        "state_schema_invalid",
+        "state_schema_mismatch",
+        "state_unreadable",
+        "recovery_clear",
+        "recovery_required",
+        "recovery_escalated",
+        "recovery_blocked",
+        "recovery_unavailable",
+        "setup_marker_missing",
+        "setup_marker_symlink",
+        "setup_marker_invalid",
+        "setup_marker_not_private",
+        "setup_marker_incomplete",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -144,6 +186,8 @@ def _result(status: DiagnosticStatus, code: str) -> _ProbeResult:
     # Never permit a hostile injected probe to expand the public protocol.
     try:
         Diagnostic("probe", status, code)
+        if code not in _PROBE_CODES:
+            raise ValueError("diagnostic code is not allowlisted")
     except (TypeError, ValueError):
         return _ProbeResult("warning", "probe_unavailable")
     return _ProbeResult(status, code)
@@ -161,7 +205,11 @@ def _normalise_probe(value: object, *, ok_code: str, fail_code: str) -> _ProbeRe
         return _result("warning", fail_code)
     if isinstance(value, tuple) and len(value) == 2:
         status, code = value
-        if status in ("ok", "warning", "blocked") and isinstance(code, str):
+        if (
+            status in ("ok", "warning", "blocked")
+            and isinstance(code, str)
+            and code in {ok_code, fail_code}
+        ):
             return _result(cast(DiagnosticStatus, status), code)
     if isinstance(value, Mapping):
         try:

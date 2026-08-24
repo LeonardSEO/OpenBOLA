@@ -106,6 +106,21 @@ def test_unsupported_platform_and_missing_root_fail_closed(tmp_path: Path) -> No
     assert any(item.code == "data_root_missing" for item in report.diagnostics)
 
 
+def test_probe_tuple_cannot_publish_arbitrary_detail(tmp_path: Path) -> None:
+    report = run_doctor(
+        data_root_path=tmp_path,
+        platform="darwin",
+        browser_probe=lambda: ("warning", "TOKEN_SECRET_VALUE"),
+        vault_probe=lambda: True,
+        package_probe=lambda: True,
+        state_probe=lambda _path: True,
+        recovery_gate=_Recovery("clear"),
+    )
+    browser = next(item for item in report.diagnostics if item.name == "browser")
+    assert browser.code == "browser_unavailable"
+    assert "TOKEN_SECRET_VALUE" not in report.to_json()
+
+
 def test_symlinked_data_root_is_blocked(tmp_path: Path) -> None:
     target = tmp_path / "real"
     target.mkdir()
