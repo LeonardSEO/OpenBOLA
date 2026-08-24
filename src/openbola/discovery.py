@@ -6,7 +6,11 @@ Adapters consume already-captured ``RequestRecord`` evidence and never send
 a request themselves. Every field this module reports comes from data
 ``RequestRecord`` already carries; it never assumes richer fidelity than
 that (see the roadmap's P4 entry for why field *value types* are
-deliberately not part of ``FieldInventory``).
+deliberately not part of ``FieldInventory``). Object-ID-shaped JSON keys
+(e.g. Firebase-style ``{"uid_...": {...}}`` maps) are routed to
+``record_handles`` rather than ``fields`` for the same reason path-embedded
+IDs are: raw IDs never appear in persisted state, reports, or AI context —
+only opaque handles do.
 """
 
 from __future__ import annotations
@@ -15,9 +19,10 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import urlsplit
 
-from openbola.endpoints import extract_object_ids, templatize
+from openbola.endpoints import extract_object_ids, is_object_id, templatize
 from openbola.handles import InMemorySessionValueRegistry, ValueHandle
 from openbola.models import RequestRecord
 
@@ -51,7 +56,8 @@ class ProviderDetection:
 
 
 class ProviderAdapter(Protocol):
-    name: str
+    @property
+    def name(self) -> str: ...
 
     def detect(self, records: Sequence[RequestRecord]) -> ProviderDetection: ...
     def inventory(self, records: Sequence[RequestRecord]) -> tuple[ResourceInventory, ...]: ...
@@ -70,21 +76,25 @@ class GenericAdapter:
         return ProviderDetection(provider="generic", confidence=ProviderConfidence.UNKNOWN)
 
     def inventory(self, records: Sequence[RequestRecord]) -> tuple[ResourceInventory, ...]:
-        groups: dict[str, list[RequestRecord]] = {}
+        groups: dict[tuple[str, str], list[RequestRecord]] = {}
         for record in records:
+            split = urlsplit(record.url)
+            origin = f"{split.scheme}://{split.netloc}"
             template = templatize(record.url)
-            groups.setdefault(template, []).append(record)
+            groups.setdefault((origin, template), []).append(record)
 
         inventories: list[ResourceInventory] = []
-        for template in sorted(groups):
-            group = groups[template]
-            methods = frozenset(record.method for record in group)
+        for origin, template in sorted(groups):
+            group = groups[(origin, template)]
+            methods = frozenset(record.method.upper() for record in group)
 
             field_names: set[str] = set()
             object_ids: set[str] = set()
             for record in group:
-                field_names.update(_top_level_json_keys(record.body))
-                field_names.update(_top_level_json_keys(record.response_body))
+                for key in _top_level_json_keys(record.body):
+                    _classify_key(key, field_names, object_ids)
+                for key in _top_level_json_keys(record.response_body):
+                    _classify_key(key, field_names, object_ids)
                 object_ids.update(extract_object_ids(record.url))
 
             fields = tuple(FieldInventory(name=name) for name in sorted(field_names))
@@ -104,6 +114,23 @@ class GenericAdapter:
                 )
             )
         return tuple(inventories)
+
+
+if TYPE_CHECKING:
+
+    def _generic_adapter_satisfies_provider_adapter(
+        registry: InMemorySessionValueRegistry,
+    ) -> ProviderAdapter:
+        """Static-only check: mypy fails here if GenericAdapter drifts from the Protocol."""
+        return GenericAdapter(registry)
+
+
+def _classify_key(key: str, field_names: set[str], object_ids: set[str]) -> None:
+    """Route object-ID-shaped or email-shaped JSON keys to handles, not field names."""
+    if "@" in key or is_object_id(key):
+        object_ids.add(key)
+    else:
+        field_names.add(key)
 
 
 def _top_level_json_keys(body: bytes | None) -> set[str]:

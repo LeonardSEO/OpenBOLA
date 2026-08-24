@@ -208,3 +208,86 @@ def test_generic_adapter_resource_name_skips_every_numbered_placeholder() -> Non
     assert len(inventories) == 1
     assert inventories[0].endpoint_template == "/v1/orgs/{id}/users/{id2}"
     assert inventories[0].resource_name == "users"
+
+
+def test_generic_adapter_routes_id_shaped_keys_to_handles_not_fields() -> None:
+    from openbola.discovery import GenericAdapter
+
+    registry = InMemorySessionValueRegistry()
+    adapter = GenericAdapter(registry)
+    records = [
+        _record(
+            "GET",
+            "https://proj.firebaseio.com/users.json",
+            response_body=(
+                b'{"-NqA1bC2dEfGhIjKlMn": {"name": "Alice"}, '
+                b'"opaque_secret_record_4eC39HqLyjWDarjtT1zdp7dc": {"name": "Bob"}}'
+            ),
+        ),
+    ]
+
+    inventories = adapter.inventory(records)
+    assert len(inventories) == 1
+    inv = inventories[0]
+    # Both top-level keys are ID-shaped, so no field names survive at this
+    # level; the nested "name" fields are one level deeper than this
+    # provider-agnostic scan inspects (_top_level_json_keys only, per Fix 1's
+    # scope), and only the ID-shaped keys themselves are the concern here.
+    assert {f.name for f in inv.fields} == set()
+    resolved = {registry.resolve_value(h) for h in inv.record_handles}
+    assert resolved == {"-NqA1bC2dEfGhIjKlMn", "opaque_secret_record_4eC39HqLyjWDarjtT1zdp7dc"}
+
+
+def test_generic_adapter_routes_email_shaped_keys_to_handles() -> None:
+    from openbola.discovery import GenericAdapter
+
+    registry = InMemorySessionValueRegistry()
+    adapter = GenericAdapter(registry)
+    records = [
+        _record(
+            "GET",
+            "https://api.example.test/v1/accounts",
+            response_body=b'{"alice@example.test": {"role": "admin"}}',
+        ),
+    ]
+
+    inventories = adapter.inventory(records)
+    assert len(inventories) == 1
+    inv = inventories[0]
+    # The only top-level key is the email address; the nested "role" field
+    # is one level deeper than this provider-agnostic scan inspects
+    # (_top_level_json_keys only, per Fix 1's scope).
+    assert {f.name for f in inv.fields} == set()
+    assert {registry.resolve_value(h) for h in inv.record_handles} == {"alice@example.test"}
+
+
+def test_generic_adapter_does_not_merge_records_across_origins() -> None:
+    from openbola.discovery import GenericAdapter
+
+    adapter = GenericAdapter(InMemorySessionValueRegistry())
+    records = [
+        _record("GET", "https://tenant-a.example.com/v1/users/42"),
+        _record("DELETE", "https://tenant-b.example.com/v1/users/99"),
+    ]
+
+    inventories = adapter.inventory(records)
+    assert len(inventories) == 2
+    for inv in inventories:
+        assert inv.endpoint_template == "/v1/users/{id}"
+        assert len(inv.record_handles) == 1
+    observed = {inv.observed_methods for inv in inventories}
+    assert observed == {frozenset({"GET"}), frozenset({"DELETE"})}
+
+
+def test_generic_adapter_normalizes_method_case() -> None:
+    from openbola.discovery import GenericAdapter
+
+    adapter = GenericAdapter(InMemorySessionValueRegistry())
+    records = [
+        _record("get", "https://api.example.test/v1/widgets"),
+        _record("GET", "https://api.example.test/v1/widgets"),
+    ]
+
+    inventories = adapter.inventory(records)
+    assert len(inventories) == 1
+    assert inventories[0].observed_methods == frozenset({"GET"})
