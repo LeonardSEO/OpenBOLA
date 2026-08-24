@@ -25,12 +25,15 @@ from openbola.ai import (
     TestPlan,
     _parse_test_plan,
     build_sanitized_context,
+    parse_proposed_plan,
     sanitize_context,
     validate_plan_for_context,
+    validate_proposed_plan,
 )
 from openbola.capture import InSessionCapture
 from openbola.discovery import GenericAdapter
 from openbola.handles import InMemorySessionValueRegistry, SecretHandle
+from openbola.scope import ScopeGuard
 
 
 def _planning_candidate(**overrides: Any) -> PlanningCandidate:
@@ -355,3 +358,118 @@ def test_provider_timeouts_must_be_finite_positive_and_bounded(timeout: object) 
         LiteLLMAdapter("test/provider", timeout=timeout)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="timeout"):
         CodexCLIAdapter(timeout=timeout)  # type: ignore[arg-type]
+
+
+def _proposed_json(candidate: PlanningCandidate | None = None) -> str:
+    item = candidate or _planning_candidate()
+    return json.dumps(
+        {
+            "tests": [
+                {
+                    "endpoint_handle": item.endpoint_handle,
+                    "owner_identity_handle": item.owner_identity_handle,
+                    "attacker_identity_handle": item.attacker_identity_handle,
+                    "record_handle": item.record_handle,
+                    "method": "get",
+                    "field_handles": list(item.field_handles),
+                    "rationale": "Prioritize the observed record boundary.",
+                }
+            ]
+        }
+    )
+
+
+def test_parse_proposed_plan_accepts_object_and_exact_json_fence() -> None:
+    parsed = parse_proposed_plan(_proposed_json())
+    assert parsed.tests[0].method == "GET"
+    fence = chr(96) * 3
+    fenced = f"{fence}json\n{_proposed_json()}\n{fence}"
+    assert parse_proposed_plan(fenced) == parsed
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "[]",
+        '{"tests": [], "unknown": true}',
+        '{"tests": [], "tests": []}',
+        '{"tests": []} trailing',
+        '{"tests": [1]}',
+        '{"tests": [{"endpoint_handle": "secret", "unknown": true}]}',
+        '{"tests": [], "value": NaN}',
+    ],
+)
+def test_parse_proposed_plan_rejects_non_strict_shapes_without_echoing_input(raw: str) -> None:
+    with pytest.raises(ValueError) as error:
+        parse_proposed_plan(raw)
+    assert "secret" not in str(error.value)
+
+
+def test_parse_proposed_plan_rejects_oversize_count_and_rationale() -> None:
+    candidate = _planning_candidate()
+    item = json.loads(_proposed_json(candidate))["tests"][0]
+    with pytest.raises(ValueError):
+        parse_proposed_plan(json.dumps({"tests": [item] * (MAX_PROPOSED_TESTS + 1)}))
+    item["rationale"] = " "
+    with pytest.raises(ValueError):
+        parse_proposed_plan(json.dumps({"tests": [item]}))
+    item["rationale"] = "x" * 241
+    with pytest.raises(ValueError):
+        parse_proposed_plan(json.dumps({"tests": [item]}))
+    with pytest.raises(ValueError, match="maximum size"):
+        parse_proposed_plan("x" * (MAX_AI_OUTPUT_BYTES + 1))
+
+
+class _RecordingScopeGuard(ScopeGuard):
+    def __init__(self, *, denied: bool = False) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.denied = denied
+
+    def require_allowed(self, url: str, method: str, *, now: Any = None) -> Any:
+        self.calls.append((url, method))
+        if self.denied:
+            raise ValueError("scope denied")
+        return None
+
+
+def test_validate_proposed_plan_binds_exact_candidate_and_checks_scope() -> None:
+    candidate = _planning_candidate()
+    plan = parse_proposed_plan(_proposed_json(candidate))
+    guard = _RecordingScopeGuard()
+    assert validate_proposed_plan(plan, (candidate,), guard, "https://api.example.test") == plan
+    assert guard.calls == [("https://api.example.test/v1/documents/{id}", "GET")]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"endpoint_handle": "unknown-endpoint"},
+        {"owner_identity_handle": "wrong-owner"},
+        {"attacker_identity_handle": "wrong-attacker"},
+        {"record_handle": "wrong-record"},
+        {"method": "POST"},
+        {"field_handles": ["unknown-field"]},
+    ],
+)
+def test_validate_proposed_plan_rejects_unobserved_binding(changes: dict[str, Any]) -> None:
+    candidate = _planning_candidate()
+    payload = json.loads(_proposed_json(candidate))
+    payload["tests"][0].update(changes)
+    plan = parse_proposed_plan(json.dumps(payload))
+    with pytest.raises(ValueError, match="observed candidate"):
+        validate_proposed_plan(plan, (candidate,), _RecordingScopeGuard(), "https://api.example.test")
+
+
+def test_validate_proposed_plan_checks_every_proposal_and_denial_is_fail_closed() -> None:
+    first = _planning_candidate(endpoint_handle="ep-a", record_handle="record-a")
+    second = _planning_candidate(endpoint_handle="ep-b", record_handle="record-b")
+    payload = json.loads(_proposed_json(first))
+    payload["tests"].append(json.loads(_proposed_json(second))["tests"][0])
+    plan = parse_proposed_plan(json.dumps(payload))
+    allowed_guard = _RecordingScopeGuard()
+    validate_proposed_plan(plan, (first, second), allowed_guard, "https://api.example.test")
+    assert len(allowed_guard.calls) == 2
+    guard = _RecordingScopeGuard(denied=True)
+    with pytest.raises(ValueError, match="scope denied"):
+        validate_proposed_plan(plan, (first, second), guard, "https://api.example.test")
+    assert len(guard.calls) == 1

@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from openbola.handles import SecretHandle
+from openbola.scope import ScopeGuard
 
 MAX_SUGGESTIONS = 10
 MAX_PROPOSED_TESTS = MAX_SUGGESTIONS
@@ -291,6 +292,20 @@ class ProposedPlan:
         object.__setattr__(self, "tests", tests)
 
 
+_PROPOSED_PLAN_KEYS = frozenset({"tests"})
+_PROPOSED_TEST_KEYS = frozenset(
+    {
+        "endpoint_handle",
+        "owner_identity_handle",
+        "attacker_identity_handle",
+        "record_handle",
+        "method",
+        "field_handles",
+        "rationale",
+    }
+)
+
+
 def build_sanitized_context(
     candidates: Sequence[PlanningCandidate],
 ) -> dict[str, object]:
@@ -339,6 +354,179 @@ def build_sanitized_context(
     if len(serialized.encode("utf-8")) > MAX_CONTEXT_BYTES:
         raise ValueError("AI context exceeds the maximum safe size")
     return context
+
+
+def _reject_proposed_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate object members without echoing untrusted JSON."""
+
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate proposal JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_proposed_json_constant(_value: str) -> Any:
+    raise ValueError("proposal JSON contains a non-finite number")
+
+
+def parse_proposed_plan(raw: str) -> ProposedPlan:
+    """Parse one strict, bounded JSON object into a typed proposal plan.
+
+    The parser deliberately accepts no executable fields, URLs, or resolved
+    values.  Errors are intentionally generic so provider output cannot leak
+    opaque handles or other input material into logs.
+    """
+
+    if not isinstance(raw, str):
+        raise ValueError("AI proposal output must be text")
+    try:
+        if len(raw.encode("utf-8")) > MAX_AI_OUTPUT_BYTES:
+            raise ValueError("AI proposal output exceeds the maximum size")
+    except UnicodeEncodeError as error:
+        raise ValueError("AI proposal output is not valid text") from error
+
+    candidate = raw.strip()
+    match = _FENCED_JSON_RE.fullmatch(candidate)
+    if match is not None:
+        candidate = match.group("json")
+    elif candidate.startswith(_FENCE):
+        raise ValueError("AI proposal output must use one exact JSON fenced block")
+    if not candidate:
+        raise ValueError("AI proposal output is empty")
+
+    try:
+        parsed = json.loads(
+            candidate,
+            object_pairs_hook=_reject_proposed_duplicate_keys,
+            parse_constant=_reject_proposed_json_constant,
+        )
+    except (json.JSONDecodeError, ValueError, TypeError):
+        raise ValueError("AI proposal output is not valid strict JSON") from None
+
+    if not isinstance(parsed, dict) or set(parsed) != _PROPOSED_PLAN_KEYS:
+        raise ValueError("AI proposal output does not match the proposal schema")
+    raw_tests = parsed.get("tests")
+    if not isinstance(raw_tests, list):
+        raise ValueError("AI proposal output does not match the proposal schema")
+    if len(raw_tests) > MAX_PROPOSED_TESTS:
+        raise ValueError("AI proposal output contains too many tests")
+
+    tests: list[ProposedTest] = []
+    for raw_test in raw_tests:
+        if not isinstance(raw_test, dict) or set(raw_test) != _PROPOSED_TEST_KEYS:
+            raise ValueError("AI proposal output does not match the proposal schema")
+        try:
+            tests.append(
+                ProposedTest(
+                    endpoint_handle=raw_test["endpoint_handle"],
+                    owner_identity_handle=raw_test["owner_identity_handle"],
+                    attacker_identity_handle=raw_test["attacker_identity_handle"],
+                    record_handle=raw_test["record_handle"],
+                    method=raw_test["method"],
+                    field_handles=raw_test["field_handles"],
+                    rationale=raw_test["rationale"],
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("AI proposal output does not match the proposal schema") from None
+    try:
+        return ProposedPlan(tuple(tests))
+    except (TypeError, ValueError):
+        raise ValueError("AI proposal output does not match the proposal schema") from None
+
+
+def _proposal_binding_key(
+    proposal: ProposedTest,
+) -> tuple[str, str, str, str, str, tuple[str, ...]]:
+    return (
+        proposal.endpoint_handle,
+        proposal.owner_identity_handle,
+        proposal.attacker_identity_handle,
+        proposal.record_handle,
+        proposal.method,
+        proposal.field_handles,
+    )
+
+
+def _candidate_binding_key(
+    candidate: PlanningCandidate,
+) -> tuple[str, str, str, str, str, tuple[str, ...]]:
+    return (
+        candidate.endpoint_handle,
+        candidate.owner_identity_handle,
+        candidate.attacker_identity_handle,
+        candidate.record_handle,
+        candidate.method,
+        candidate.field_handles,
+    )
+
+
+def validate_proposed_plan(
+    plan: ProposedPlan,
+    candidates: Sequence[PlanningCandidate],
+    target_scope_guard: ScopeGuard,
+    target_origin: str,
+) -> ProposedPlan:
+    """Bind proposals to observed candidates and re-check target scope.
+
+    This function only returns the same non-executable typed plan.  It never
+    resolves handles or performs network operations; the scope guard call is a
+    policy check for the path that a later executor would independently use.
+    """
+
+    if not isinstance(plan, ProposedPlan):
+        raise ValueError("AI proposal plan must be typed")
+    if isinstance(candidates, (str, bytes)) or not isinstance(candidates, Sequence):
+        raise ValueError("AI planning candidates must be a sequence")
+    if len(candidates) > MAX_CANDIDATES:
+        raise ValueError("too many AI planning candidates")
+    if not isinstance(target_scope_guard, ScopeGuard):
+        raise ValueError("target scope guard must be a ScopeGuard")
+    if (
+        not isinstance(target_origin, str)
+        or not target_origin
+        or any(character.isspace() or ord(character) < 32 for character in target_origin)
+    ):
+        raise ValueError("target origin is invalid")
+
+    indexed: dict[
+        tuple[str, str, str, str, str, tuple[str, ...]],
+        PlanningCandidate,
+    ] = {}
+    by_core: dict[tuple[str, str, str, str, str], list[PlanningCandidate]] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, PlanningCandidate):
+            raise ValueError("AI planning candidates must be typed")
+        key = _candidate_binding_key(candidate)
+        if key in indexed:
+            raise ValueError("AI planning candidates contain a duplicate binding")
+        indexed[key] = candidate
+        core = key[:5]
+        by_core.setdefault(core, []).append(candidate)
+
+    seen_proposals: set[tuple[str, str, str, str, str, tuple[str, ...]]] = set()
+    resolved: list[PlanningCandidate] = []
+    for proposal in plan.tests:
+        key = _proposal_binding_key(proposal)
+        if key in seen_proposals:
+            raise ValueError("AI proposal contains a duplicate binding")
+        seen_proposals.add(key)
+        core = key[:5]
+        matches = [
+            candidate
+            for candidate in by_core.get(core, [])
+            if set(proposal.field_handles).issubset(candidate.field_handles)
+        ]
+        if len(matches) != 1:
+            raise ValueError("AI proposal does not match an observed candidate")
+        resolved.append(matches[0])
+
+    for proposal, candidate in zip(plan.tests, resolved, strict=True):
+        target_url = target_origin.rstrip("/") + candidate.endpoint_template
+        target_scope_guard.require_allowed(target_url, proposal.method)
+    return plan
 
 
 class TestSuggestion(BaseModel):
