@@ -27,7 +27,7 @@ credentials, or private request material into this document or its evidence.
 Approval needed: none for the read-only preflight; explicit approval is needed
 before any rename or transfer mutation.
 
-- Preflight (read-only):
+- Dry-run / preflight (read-only):
 
   ```bash
   gh repo view --json nameWithOwner,viewerPermission,defaultBranchRef
@@ -42,7 +42,7 @@ before any rename or transfer mutation.
   # STOP—approval required: gh repo rename openbola --yes
   ```
 
-- Verification (read-only):
+- Post-action verification (read-only):
 
   ```bash
   gh repo view LeonardSEO/openbola --json nameWithOwner,defaultBranchRef
@@ -56,7 +56,7 @@ force or rewrite history.
 
 Approval needed: explicit approval for changing the local `origin` URL.
 
-- Preflight (read-only):
+- Dry-run / preflight (read-only):
 
   ```bash
   git remote -v
@@ -70,7 +70,7 @@ Approval needed: explicit approval for changing the local `origin` URL.
   # git remote set-url origin https://github.com/LeonardSEO/openbola.git
   ```
 
-- Verification (read-only):
+- Post-action verification (read-only):
 
   ```bash
   git remote get-url origin
@@ -85,7 +85,7 @@ discard local branches.
 
 Approval needed: explicit approval for the exact topic list.
 
-- Preflight (read-only):
+- Dry-run / preflight (read-only):
 
   ```bash
   gh repo view LeonardSEO/openbola --json repositoryTopics
@@ -98,7 +98,7 @@ Approval needed: explicit approval for the exact topic list.
   # gh repo edit LeonardSEO/openbola --add-topic api-security --add-topic bola --add-topic idor
   ```
 
-- Verification (read-only):
+- Post-action verification (read-only):
 
   ```bash
   gh repo view LeonardSEO/openbola --json repositoryTopics
@@ -112,7 +112,7 @@ that approved list and abort on an unexpected owner/repository response.
 Approval needed: explicit approval for the private reporting URL and its
 handling policy. The public security policy remains [SECURITY.md](../../SECURITY.md).
 
-- Preflight (read-only):
+- Dry-run / preflight (read-only):
 
   ```bash
   gh repo view LeonardSEO/openbola --json nameWithOwner
@@ -128,7 +128,7 @@ handling policy. The public security policy remains [SECURITY.md](../../SECURITY
   # STOP—approval required: configure the approved private reporting URL in GitHub Security settings
   ```
 
-- Verification (read-only): re-open the repository Security settings and
+- Post-action verification (read-only): re-open the repository Security settings and
   compare the displayed state with the approved URL fingerprint; also inspect
   `SECURITY.md` locally:
 
@@ -145,7 +145,7 @@ or live customer URL is recorded in the evidence.
 Approval needed: explicit approval for creating the release and uploading the
 locally verified artifacts.
 
-- Preflight (read-only):
+- Dry-run / preflight (read-only):
 
   ```bash
   git rev-parse HEAD
@@ -163,7 +163,7 @@ locally verified artifacts.
   # gh release create VERSION --repo LeonardSEO/openbola --title "OpenBOLA VERSION" --notes-file RELEASE_NOTES.md dist/openbola-VERSION-windows-x64.zip dist/openbola-VERSION-macos-arm64.tar.gz dist/openbola-VERSION-macos-x64.tar.gz dist/SHA256SUMS
   ```
 
-- Verification (read-only):
+- Post-action verification (read-only):
 
   ```bash
   gh release view VERSION --repo LeonardSEO/openbola --json tagName,name,isDraft,isPrerelease,assets
@@ -178,7 +178,7 @@ abort; do not delete and recreate a release.
 
 Approval needed: explicit approval for uploading the checked-in preview.
 
-- Preflight (read-only):
+- Dry-run / preflight (read-only):
 
   ```bash
   uv run python scripts/check_launch_assets.py docs/assets/openbola-social-preview.svg --kind social
@@ -188,7 +188,7 @@ Approval needed: explicit approval for uploading the checked-in preview.
 - STOP—obtain approval, then upload `docs/assets/openbola-social-preview.png`
   (or the reviewed SVG-derived image) through the repository Settings UI. Do
   not upload a private screenshot, customer data, or an unreviewed derivative.
-- Verification (read-only): reopen the repository Overview and Settings pages
+- Post-action verification (read-only): reopen the repository Overview and Settings pages
   and record the displayed preview's immutable repository URL plus the source
   asset SHA-256. No token or session URL belongs in the evidence.
 

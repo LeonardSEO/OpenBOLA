@@ -27,6 +27,7 @@ _COOKIE = re.compile(r"(?i)\b(?:cookie|set-cookie)\s*[:=]")
 _HOME = re.compile(r"(?:^|[\s=:])(?:/Users/|/home/|C:\\\\Users\\\\|%USERPROFILE%)")
 _DATE = re.compile(r"\b(?:19|20)\d{2}[-/]\d{2}[-/]\d{2}(?:[T ]\d{2}:\d{2}:\d{2})?\b")
 _EPOCH = re.compile(r"\b1[5-9]\d{9}\b")
+_LONG_HEX = re.compile(r"\b[0-9a-f]{16,}\b", re.IGNORECASE)
 _RAW_ID = re.compile(
     r"(?i)\b(?:raw[ _-]*)?(?:object|record|run)[ _-]*id\s*[:=]\s*(?!\$\{)[A-Za-z0-9_-]+"
 )
@@ -45,7 +46,13 @@ def _safe_text(value: str) -> None:
         _fail()
     if _TOKEN.search(value) or _COOKIE.search(value) or _UUID.search(value):
         _fail()
-    if _HOME.search(value) or _DATE.search(value) or _EPOCH.search(value) or _RAW_ID.search(value):
+    if (
+        _HOME.search(value)
+        or _DATE.search(value)
+        or _EPOCH.search(value)
+        or _LONG_HEX.search(value)
+        or _RAW_ID.search(value)
+    ):
         _fail()
     placeholders = set(_PLACEHOLDER.findall(value))
     if placeholders and not placeholders.issubset(_ALLOWED_PLACEHOLDERS):
