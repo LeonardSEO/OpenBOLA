@@ -213,3 +213,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   lockfile graph were removed in `454b7c2`; typed compatibility shim remains
   deprecation-safe and non-executing. AI tests 66 passed with Ruff/mypy. P5
   Task 5 is the final acceptance/roadmap update gate.
+- P5 Task 5 acceptance is committed as `6eb2dab`: separate provider-scope
+  boundary test, strict fake transport privacy/binding checks, close fail-
+  closed proof, and roadmap P5 marker. Implementer reports focused 106, full
+  pytest 475, Ruff, and strict mypy green; independent review is pending.
