@@ -18,7 +18,12 @@ from openbola.models import (
     Verdict,
 )
 from openbola.reporting import (
+    CapabilityProof,
+    FindingEvidence,
     ReportBundle,
+    ReportField,
+    ReportFinding,
+    ResourceReport,
     RunSummary,
     generate_json_report,
     generate_junit_xml,
@@ -90,6 +95,100 @@ def _bundle(
         authorization_reference="ENG-1234-approved-scope",
         total_combinations=4,
     )
+
+
+def test_typed_evidence_is_frozen_and_rejects_unknown_capabilities() -> None:
+    proof = CapabilityProof(
+        "read",
+        "proven",
+        "identity_a",
+        "identity_b",
+        200,
+        200,
+        "object_id_match",
+        "not_applicable",
+        "complete",
+    )
+    evidence = FindingEvidence(
+        None,
+        (),
+        (),
+        (proof,),
+        "high",
+        ("GET /documents/{id}",),
+        "Enforce ownership checks.",
+        "not_applicable",
+        "complete",
+    )
+    assert evidence.capabilities == (proof,)
+    with pytest.raises((AttributeError, TypeError)):
+        evidence.confidence = "critical"  # type: ignore[misc]
+    with pytest.raises(ValueError, match="capability"):
+        CapabilityProof(  # type: ignore[arg-type]
+            "trace",
+            "proven",
+            None,
+            None,
+            None,
+            None,
+            None,
+            "not_applicable",
+            "not_tested",
+        )
+
+
+def test_legacy_adapter_allows_known_fields_and_rejects_unknown_fields() -> None:
+    evidence = FindingEvidence.from_legacy_mapping(
+        {
+            "attacker_status": 200,
+            "comparison": "object_id_match",
+            "object_ref": "obj_" + "a" * 64,
+        },
+        method="GET",
+        endpoint_template="/documents/{id}",
+    )
+    assert evidence.object_ref == "obj_" + "a" * 64
+    assert evidence.capabilities[0].status == "proven"
+    assert "REPORT_RAW_OBJECT_SENTINEL" not in repr(evidence)
+    with pytest.raises(ValueError, match="allowlist"):
+        FindingEvidence.from_legacy_mapping(
+            {"future_secret": "sentinel"},
+            method="GET",
+            endpoint_template="/documents/{id}",
+        )
+
+
+def test_typed_report_contracts_reject_unsorted_or_unsafe_values() -> None:
+    fields = (ReportField("z", "string"), ReportField("a", "string"))
+    with pytest.raises(ValueError, match="sorted"):
+        ResourceReport(
+            "generic-http",
+            "confirmed",
+            "documents",
+            "/documents/{id}",
+            1,
+            fields,
+            (),
+        )
+    with pytest.raises(ValueError, match="safe path"):
+        ReportFinding(
+            "/../etc/passwd",
+            "GET",
+            "high",
+            "unsafe",
+            "unsafe",
+            FindingEvidence(
+                None,
+                (),
+                (),
+                (),
+                "legacy",
+                (),
+                "Enforce ownership checks.",
+                "not_applicable",
+                "partial",
+            ),
+        )
 
 
 def test_reports_reject_session_material_and_emit_no_full_value_sentinel(

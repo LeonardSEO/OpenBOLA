@@ -23,7 +23,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, TypeVar
 from urllib.parse import quote
 
 from openbola.models import Finding, ProbeResult, Verdict
@@ -68,6 +68,384 @@ _DEFAULT_LIMITATIONS = (
     "Read probes compare authorization behavior and do not establish the absence of other flaws.",
     "Credentials, request headers, cookies, tokens, and bodies are excluded from this report.",
 )
+
+# These aliases are deliberately closed.  Report renderers must not accept an
+# arbitrary verb or status supplied by a legacy ``Finding`` row.
+CapabilityName = Literal["read", "post", "patch", "put", "delete"]
+ProofStatus = Literal["proven", "not_proven", "inconclusive", "not_tested"]
+CleanupStatus = Literal["verified", "not_applicable", "inconclusive", "not_run"]
+CoverageStatus = Literal["complete", "partial", "not_tested"]
+
+_CAPABILITIES = frozenset({"read", "post", "patch", "put", "delete"})
+_PROOF_STATUSES = frozenset({"proven", "not_proven", "inconclusive", "not_tested"})
+_CLEANUP_STATUSES = frozenset({"verified", "not_applicable", "inconclusive", "not_run"})
+_COVERAGE_STATUSES = frozenset({"complete", "partial", "not_tested"})
+_IDENTITY_REF_RE = re.compile(r"identity_[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
+_TEXT_LIMIT = 512
+_COUNT_LIMIT = 100_000
+_LEGACY_SENSITIVE_KEYS = frozenset(
+    {
+        "authorization",
+        "authentication",
+        "api_key",
+        "api-key",
+        "bearer",
+        "body",
+        "cookie",
+        "cookies",
+        "credential",
+        "credentials",
+        "header",
+        "headers",
+        "password",
+        "pass",
+        "session",
+        "token",
+    }
+)
+
+
+def _typed_text(value: str, *, field_name: str) -> str:
+    """Validate and sanitize bounded human-readable report text."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"report {field_name} must be a non-empty string")
+    sanitized = _safe_display_text(value)
+    if not sanitized or len(sanitized) > _TEXT_LIMIT:
+        raise ValueError(f"report {field_name} exceeds the display limit")
+    return sanitized
+
+
+def _typed_optional_ref(value: str | None, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _IDENTITY_REF_RE.fullmatch(value):
+        raise ValueError(f"report {field_name} must be an opaque identity reference")
+    return value
+
+
+def _identity_fingerprint(value: str, *, field_name: str) -> str:
+    """Turn a legacy identity label into an opaque, stable report reference."""
+
+    if not isinstance(value, str) or not value.strip() or len(value) > _TEXT_LIMIT:
+        raise ValueError(f"report {field_name} is invalid")
+    return "identity_" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _typed_status(value: int | None, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 100 <= value <= 599:
+        raise ValueError(f"report {field_name} HTTP status is invalid")
+    return value
+
+
+_SortValue = TypeVar("_SortValue")
+
+
+def _validate_sorted_unique(
+    values: tuple[_SortValue, ...], *, key: Any, field_name: str
+) -> None:
+    ordered = tuple(sorted(values, key=key))
+    if values != ordered:
+        raise ValueError(f"report {field_name} must be sorted")
+    if len(set(values)) != len(values):
+        raise ValueError(f"report {field_name} must be unique")
+
+
+@dataclass(frozen=True)
+class CapabilityProof:
+    capability: CapabilityName
+    status: ProofStatus
+    owner_identity_ref: str | None
+    attacker_identity_ref: str | None
+    owner_status: int | None
+    attacker_status: int | None
+    comparison: str | None
+    cleanup: CleanupStatus
+    coverage: CoverageStatus
+
+    def __post_init__(self) -> None:
+        if self.capability not in _CAPABILITIES:
+            raise ValueError("report capability is not supported")
+        if self.status not in _PROOF_STATUSES:
+            raise ValueError("report capability status is not supported")
+        if self.cleanup not in _CLEANUP_STATUSES:
+            raise ValueError("report cleanup status is not supported")
+        if self.coverage not in _COVERAGE_STATUSES:
+            raise ValueError("report coverage status is not supported")
+        _typed_optional_ref(self.owner_identity_ref, field_name="owner identity")
+        _typed_optional_ref(self.attacker_identity_ref, field_name="attacker identity")
+        _typed_status(self.owner_status, field_name="owner")
+        _typed_status(self.attacker_status, field_name="attacker")
+        if self.comparison is not None and (
+            not isinstance(self.comparison, str)
+            or (
+                self.comparison not in _ALLOWED_COMPARISONS
+                and self.comparison != "unknown"
+            )
+        ):
+            raise ValueError("report capability comparison is invalid")
+
+
+@dataclass(frozen=True)
+class ReportField:
+    name: str
+    type_name: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _typed_text(self.name, field_name="field name"))
+        object.__setattr__(
+            self, "type_name", _typed_text(self.type_name, field_name="field type")
+        )
+
+
+def _field_key(item: ReportField) -> tuple[str, str]:
+    return item.name, item.type_name
+
+
+def _capability_key(item: CapabilityProof) -> tuple[Any, ...]:
+    return (
+        item.capability,
+        item.status,
+        item.owner_identity_ref or "",
+        item.attacker_identity_ref or "",
+        item.owner_status or 0,
+        item.attacker_status or 0,
+        item.comparison or "",
+        item.cleanup,
+        item.coverage,
+    )
+
+
+@dataclass(frozen=True)
+class ResourceReport:
+    provider: str
+    confidence: str
+    dataset: str
+    endpoint_template: str
+    total_discovered: int
+    fields: tuple[ReportField, ...]
+    capabilities: tuple[CapabilityProof, ...]
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.provider, "provider"),
+            (self.confidence, "confidence"),
+            (self.dataset, "dataset"),
+        ):
+            _typed_text(value, field_name=name)
+        object.__setattr__(self, "provider", _typed_text(self.provider, field_name="provider"))
+        object.__setattr__(
+            self, "confidence", _typed_text(self.confidence, field_name="confidence")
+        )
+        object.__setattr__(self, "dataset", _typed_text(self.dataset, field_name="dataset"))
+        _safe_endpoint_template(self.endpoint_template)
+        if (
+            isinstance(self.total_discovered, bool)
+            or not isinstance(self.total_discovered, int)
+            or not 0 <= self.total_discovered <= _COUNT_LIMIT
+        ):
+            raise ValueError("report total discovered count is invalid")
+        fields = tuple(self.fields)
+        capabilities = tuple(self.capabilities)
+        if any(not isinstance(item, ReportField) for item in fields):
+            raise TypeError("report fields must contain ReportField values")
+        if any(not isinstance(item, CapabilityProof) for item in capabilities):
+            raise TypeError("report capabilities must contain CapabilityProof values")
+        _validate_sorted_unique(fields, key=_field_key, field_name="fields")
+        _validate_sorted_unique(capabilities, key=_capability_key, field_name="capabilities")
+        object.__setattr__(self, "fields", fields)
+        object.__setattr__(self, "capabilities", capabilities)
+
+
+@dataclass(frozen=True)
+class FindingEvidence:
+    object_ref: str | None
+    impacted_identity_refs: tuple[str, ...]
+    fields: tuple[ReportField, ...]
+    capabilities: tuple[CapabilityProof, ...]
+    confidence: str
+    reproduction: tuple[str, ...]
+    remediation: str
+    cleanup: CleanupStatus
+    coverage: CoverageStatus
+
+    def __post_init__(self) -> None:
+        if self.object_ref is not None and not _OBJECT_REF_RE.fullmatch(self.object_ref):
+            raise ValueError("report object reference is invalid")
+        identities = tuple(self.impacted_identity_refs)
+        if any(
+            not isinstance(item, str) or not _IDENTITY_REF_RE.fullmatch(item)
+            for item in identities
+        ):
+            raise ValueError("report impacted identity reference is invalid")
+        _validate_sorted_unique(identities, key=lambda item: item, field_name="identity references")
+        fields = tuple(self.fields)
+        capabilities = tuple(self.capabilities)
+        if any(not isinstance(item, ReportField) for item in fields):
+            raise TypeError("report fields must contain ReportField values")
+        if any(not isinstance(item, CapabilityProof) for item in capabilities):
+            raise TypeError("report capabilities must contain CapabilityProof values")
+        _validate_sorted_unique(fields, key=_field_key, field_name="fields")
+        _validate_sorted_unique(capabilities, key=_capability_key, field_name="capabilities")
+        reproduction = tuple(self.reproduction)
+        if any(not isinstance(item, str) for item in reproduction):
+            raise ValueError("report reproduction steps must be strings")
+        reproduction = tuple(
+            _typed_text(item, field_name="reproduction step") for item in reproduction
+        )
+        if self.cleanup not in _CLEANUP_STATUSES:
+            raise ValueError("report cleanup status is not supported")
+        if self.coverage not in _COVERAGE_STATUSES:
+            raise ValueError("report coverage status is not supported")
+        object.__setattr__(self, "impacted_identity_refs", identities)
+        object.__setattr__(self, "fields", fields)
+        object.__setattr__(self, "capabilities", capabilities)
+        object.__setattr__(
+            self, "confidence", _typed_text(self.confidence, field_name="confidence")
+        )
+        object.__setattr__(self, "reproduction", reproduction)
+        object.__setattr__(
+            self, "remediation", _typed_text(self.remediation, field_name="remediation")
+        )
+
+    @classmethod
+    def from_legacy_mapping(
+        cls,
+        evidence: Mapping[str, Any],
+        *,
+        method: str,
+        endpoint_template: str,
+    ) -> FindingEvidence:
+        """Convert one old evidence mapping into a closed report contract.
+
+        Legacy evidence has no ownership labels or mutation lifecycle facts;
+        those are intentionally represented as empty/unknown values instead
+        of being guessed from a read result.
+        """
+
+        if not isinstance(evidence, Mapping):
+            raise TypeError("legacy report evidence must be a mapping")
+        method = _safe_method(method)
+        endpoint_template = _safe_endpoint_template(endpoint_template)
+        allowed = {
+            "owner_status",
+            "attacker_status",
+            "owner_identity",
+            "attacker_identity",
+            "comparison",
+            "object_ref",
+            "status",
+            "retryable",
+            "error_code",
+        }
+        safe: dict[str, Any] = {}
+        for key, value in evidence.items():
+            if not isinstance(key, str):
+                raise ValueError("report evidence keys must be strings")
+            normalized = key.lower()
+            if normalized in _LEGACY_SENSITIVE_KEYS:
+                continue
+            if normalized not in allowed:
+                raise ValueError("report evidence contains a field outside the allowlist")
+            safe[normalized] = value
+        owner_status = _typed_status(safe.get("owner_status"), field_name="owner")
+        attacker_status = _typed_status(safe.get("attacker_status"), field_name="attacker")
+        owner_identity_ref = (
+            _identity_fingerprint(safe["owner_identity"], field_name="owner identity")
+            if "owner_identity" in safe
+            else None
+        )
+        attacker_identity_ref = (
+            _identity_fingerprint(safe["attacker_identity"], field_name="attacker identity")
+            if "attacker_identity" in safe
+            else None
+        )
+        comparison = safe.get("comparison")
+        if comparison is not None and (
+            not isinstance(comparison, str)
+            or comparison not in _ALLOWED_COMPARISONS
+        ):
+            raise ValueError("report evidence comparison is invalid")
+        object_ref = safe.get("object_ref")
+        if object_ref is not None and (
+            not isinstance(object_ref, str) or not _OBJECT_REF_RE.fullmatch(object_ref)
+        ):
+            raise ValueError("report evidence object reference is invalid")
+        status_value = safe.get("status")
+        if status_value is not None and (
+            not isinstance(status_value, str)
+            or status_value not in {item.value for item in Verdict}
+        ):
+            raise ValueError("report evidence status is invalid")
+        if "retryable" in safe and not isinstance(safe["retryable"], bool):
+            raise ValueError("report evidence retryable must be boolean")
+        if "error_code" in safe and (
+            not isinstance(safe["error_code"], str)
+            or safe["error_code"] not in _ALLOWED_ERROR_CODES
+        ):
+            raise ValueError("report evidence error code is invalid")
+
+        if status_value == Verdict.INCONCLUSIVE.value or "error_code" in safe:
+            proof_status: ProofStatus = "inconclusive"
+        elif status_value == Verdict.SKIPPED.value:
+            proof_status = "not_tested"
+        elif status_value == Verdict.PROTECTED.value or comparison == "object_id_mismatch":
+            proof_status = "not_proven"
+        elif (
+            method == "GET"
+            and comparison == "object_id_match"
+            and attacker_status is not None
+            and 200 <= attacker_status <= 299
+        ):
+            proof_status = "proven"
+        else:
+            proof_status = "not_tested"
+        proof = CapabilityProof(
+            "read",
+            proof_status,
+            owner_identity_ref,
+            attacker_identity_ref,
+            owner_status,
+            attacker_status,
+            comparison,
+            "not_applicable",
+            "partial",
+        )
+        return cls(
+            object_ref,
+            (),
+            (),
+            (proof,),
+            "legacy",
+            (f"{method} {endpoint_template}",),
+            "Enforce object-level authorization checks.",
+            "not_applicable",
+            "partial",
+        )
+
+
+@dataclass(frozen=True)
+class ReportFinding:
+    endpoint_template: str
+    method: str
+    severity: str
+    title: str
+    description: str
+    evidence: FindingEvidence
+
+    def __post_init__(self) -> None:
+        _safe_endpoint_template(self.endpoint_template)
+        _safe_method(self.method)
+        if self.severity not in _SEVERITIES:
+            raise ValueError("finding severity is not supported by the report format")
+        if not isinstance(self.evidence, FindingEvidence):
+            raise TypeError("report finding evidence must be FindingEvidence")
+        object.__setattr__(self, "title", _typed_text(self.title, field_name="finding title"))
+        object.__setattr__(
+            self, "description", _typed_text(self.description, field_name="finding description")
+        )
 
 
 class FindingStore(Protocol):
