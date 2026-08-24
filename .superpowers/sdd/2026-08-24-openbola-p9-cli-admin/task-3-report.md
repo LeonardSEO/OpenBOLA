@@ -25,7 +25,7 @@ Implemented the bounded, read-only local doctor service in commit `9803586`
 
 ```text
 uv run pytest tests/test_doctor.py -q
-14 passed
+15 passed
 
 uv run ruff check src/openbola/doctor.py tests/test_doctor.py
 All checks passed!
@@ -40,10 +40,12 @@ path was changed by this task.
 
 ## Review hardening
 
-Follow-up commits `b2e8ee0`, `37865dd`, `58cc976`, and `247fbfa` close the
+Follow-up commits `b2e8ee0`, `37865dd`, `58cc976`, `247fbfa`, `d8c3d64`, and
+`650dfa3` close the
 independent review findings: setup-marker keys and injected probe codes are
 allowlisted (so tuple-shaped probe details cannot carry a secret), diagnostic
 contracts reject malformed values, and wrong-type/symlink/non-private data
-roots or state paths fail closed. The data-root leaf requires private mode;
-shared ancestors are not rewritten. The focused suite now reports 14 passed,
+roots or state paths fail closed, including unsafe state parents. The data-root
+leaf requires private mode; shared ancestors are not rewritten. The focused
+suite now reports 15 passed,
 with Ruff and strict mypy still clean.
