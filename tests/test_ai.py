@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import sys
 from dataclasses import FrozenInstanceError, fields, is_dataclass
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -17,6 +15,7 @@ from openbola.ai import (
     CodexCLIAdapter,
     CodexCLIAdapterDisabledError,
     HTTPMethod,
+    LegacyAIAdapterError,
     LiteLLMAdapter,
     ObjectIDLocation,
     PlanningCandidate,
@@ -25,6 +24,7 @@ from openbola.ai import (
     TestPlan,
     _parse_test_plan,
     build_sanitized_context,
+    migrate_legacy_plan,
     parse_proposed_plan,
     sanitize_context,
     validate_plan_for_context,
@@ -332,23 +332,73 @@ def test_plan_validation_binds_response_diff_field_to_the_known_candidate() -> N
         validate_plan_for_context(plan, sanitize_context(_context()))
 
 
-def test_litellm_is_imported_lazily_and_receives_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: dict[str, Any] = {}
-
-    def completion(**kwargs: Any) -> dict[str, Any]:
-        calls.update(kwargs)
-        return {"choices": [{"message": {"content": _raw_plan()}}]}
-
-    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
-    plan = LiteLLMAdapter("test/provider", api_key="provider-secret", timeout=12).propose_tests(
-        _context()
+def _legacy_plan(
+    *,
+    endpoint_template: str = "/v1/documents/{id}",
+    method: str = "GET",
+    location: str = "query_param",
+    object_id_field_hint: str = "document_id",
+    id_field_for_diff: str = "document_id",
+) -> TestPlan:
+    return TestPlan.model_validate(
+        {
+            "suggestions": [
+                {
+                    "endpoint_template": endpoint_template,
+                    "method": method,
+                    "object_id_location": location,
+                    "object_id_field_hint": object_id_field_hint,
+                    "id_field_for_diff": id_field_for_diff,
+                    "reasoning": "Use the observed identifier boundary.",
+                }
+            ]
+        }
     )
 
-    assert plan.suggestions[0].endpoint_template == "/documents"
-    assert calls["temperature"] == 0
-    assert calls["timeout"] == 12
-    assert calls["response_format"]["type"] == "json_schema"
-    assert calls["response_format"]["json_schema"]["strict"] is True
+
+def test_legacy_plan_migrates_only_with_one_explicit_candidate_mapping() -> None:
+    candidate = _planning_candidate(field_handles=("query:document_id",))
+    migrated = migrate_legacy_plan(_legacy_plan(), (candidate,))
+
+    assert migrated.tests[0] == ProposedTest(
+        endpoint_handle=candidate.endpoint_handle,
+        owner_identity_handle=candidate.owner_identity_handle,
+        attacker_identity_handle=candidate.attacker_identity_handle,
+        record_handle=candidate.record_handle,
+        method="GET",
+        field_handles=candidate.field_handles,
+        rationale="Use the observed identifier boundary.",
+    )
+
+
+@pytest.mark.parametrize(
+    "candidate_factory",
+    [
+        lambda: (
+            _planning_candidate(field_handles=("query:document_id",)),
+            _planning_candidate(endpoint_handle="other", field_handles=("query:document_id",)),
+        ),
+        lambda: (_planning_candidate(field_handles=("field-opaque",)),),
+        lambda: (_planning_candidate(method="POST", field_handles=("query:document_id",)),),
+    ],
+)
+def test_legacy_plan_migration_rejects_ambiguous_or_absent_mapping(
+    candidate_factory: Any,
+) -> None:
+    with pytest.raises(ValueError, match="one observed candidate"):
+        migrate_legacy_plan(_legacy_plan(), candidate_factory())
+
+
+def test_legacy_adapter_is_deprecated_and_has_no_network_or_subprocess_path() -> None:
+    with pytest.deprecated_call(match="LiteLLMAdapter is deprecated"):
+        adapter = LiteLLMAdapter("test/provider", timeout=12)
+    with pytest.raises(LegacyAIAdapterError, match="AIProviderConfig"):
+        adapter.propose_tests(_context())
+
+
+def test_legacy_adapter_rejects_api_key_argument() -> None:
+    with pytest.raises(TypeError, match="api_key"):
+        LiteLLMAdapter("test/provider", api_key="provider-secret")  # type: ignore[call-arg]
 
 
 def test_codex_adapter_is_fail_closed_without_starting_a_general_agent() -> None:

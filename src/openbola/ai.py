@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import math
 import re
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -563,7 +563,12 @@ def validate_proposed_plan(
 
 
 class TestSuggestion(BaseModel):
-    """A typed idea only, never an executable request description."""
+    """Deprecated, non-executable legacy suggestion model.
+
+    New integrations should use :class:`ProposedTest`. This model remains
+    importable so downstream callers can migrate without a flag day; it never
+    contains a resolved value or an executable request.
+    """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -597,7 +602,7 @@ class TestSuggestion(BaseModel):
 
 
 class TestPlan(BaseModel):
-    """A bounded collection of non-executable test suggestions."""
+    """Deprecated, bounded collection of non-executable legacy suggestions."""
 
     __test__: ClassVar[bool] = False
     model_config = ConfigDict(extra="forbid")
@@ -921,63 +926,134 @@ def _plan_from_output(raw: str, sanitized_context: Mapping[str, Any]) -> TestPla
     return validate_plan_for_context(_parse_test_plan(raw), sanitized_context)
 
 
-class LiteLLMAdapter:
-    """Lazy LiteLLM adapter; LiteLLM remains an optional dependency."""
+class LegacyAIAdapterError(RuntimeError):
+    """Raised when a removed legacy AI network path is invoked."""
 
-    def __init__(self, model: str, api_key: str | None = None, timeout: float = 30.0) -> None:
+
+def _legacy_field_handle_matches(
+    suggestion: TestSuggestion,
+    candidate: PlanningCandidate,
+) -> bool:
+    """Check the caller-supplied field mapping without deriving any handle.
+
+    Legacy suggestions contain field *hints*, while typed candidates contain
+    opaque field handles. A migration is therefore valid only when the caller
+    supplied handles that explicitly identify both the object field and the
+    comparison field. The canonical location prefix is accepted as an
+    additional explicit mapping form (for example ``query:document_id``); no
+    handle is generated from a value or from a record identifier.
+    """
+
+    expected = {
+        suggestion.object_id_field_hint,
+        suggestion.id_field_for_diff,
+        _canonical_locator(
+            suggestion.object_id_location.value,
+            suggestion.object_id_field_hint,
+        ),
+        _canonical_locator(
+            suggestion.object_id_location.value,
+            suggestion.id_field_for_diff,
+        ),
+    }
+    handles = set(candidate.field_handles)
+    object_mapping = (
+        suggestion.object_id_field_hint in handles
+        or _canonical_locator(
+            suggestion.object_id_location.value,
+            suggestion.object_id_field_hint,
+        ) in handles
+    )
+    diff_mapping = (
+        suggestion.id_field_for_diff in handles
+        or _canonical_locator(
+            suggestion.object_id_location.value,
+            suggestion.id_field_for_diff,
+        ) in handles
+    )
+    # Keep ``expected`` as a local allowlist so this function remains explicit
+    # about the only accepted mappings; it also prevents accidental broadening
+    # if the matching rules are changed later.
+    return bool(handles & expected) and object_mapping and diff_mapping
+
+
+def migrate_legacy_plan(
+    plan: TestPlan,
+    candidates: Sequence[PlanningCandidate],
+) -> ProposedPlan:
+    """Convert a legacy non-executable plan to typed proposals fail-closed.
+
+    A legacy suggestion has no owner, attacker, record, or opaque field
+    handles. Those bindings must already be supplied by the caller through a
+    ``PlanningCandidate``. Each suggestion must match exactly one candidate by
+    endpoint template, method, and explicit field-handle mapping. Ambiguous or
+    absent mappings are rejected; this function never invents a record or
+    resolves a session value.
+    """
+
+    if not isinstance(plan, TestPlan):
+        raise ValueError("legacy AI plan must be a TestPlan")
+    if isinstance(candidates, (str, bytes)) or not isinstance(candidates, Sequence):
+        raise ValueError("planning candidates must be a sequence")
+    if len(candidates) > MAX_CANDIDATES:
+        raise ValueError("too many planning candidates")
+
+    typed_candidates = tuple(candidates)
+    if any(not isinstance(candidate, PlanningCandidate) for candidate in typed_candidates):
+        raise ValueError("planning candidates must be typed values")
+
+    migrated: list[ProposedTest] = []
+    for suggestion in plan.suggestions:
+        matches = [
+            candidate
+            for candidate in typed_candidates
+            if (
+                candidate.endpoint_template == suggestion.endpoint_template
+                and candidate.method == suggestion.method.value
+                and _legacy_field_handle_matches(suggestion, candidate)
+            )
+        ]
+        if len(matches) != 1:
+            raise ValueError("legacy AI suggestion does not match one observed candidate")
+        candidate = matches[0]
+        migrated.append(
+            ProposedTest(
+                endpoint_handle=candidate.endpoint_handle,
+                owner_identity_handle=candidate.owner_identity_handle,
+                attacker_identity_handle=candidate.attacker_identity_handle,
+                record_handle=candidate.record_handle,
+                method=candidate.method,
+                field_handles=candidate.field_handles,
+                rationale=suggestion.reasoning,
+            )
+        )
+    return ProposedPlan(tuple(migrated))
+
+
+class LiteLLMAdapter:
+    """Deprecated compatibility symbol with no provider or process access.
+
+    LiteLLM was removed because its implicit transport and credential
+    boundary could not satisfy OpenBOLA's separate provider ``ScopeGuard``
+    requirement. Use ``AIProviderConfig`` with an explicit scoped client from
+    ``openbola.ai_clients`` instead.
+    """
+
+    def __init__(self, model: str, timeout: float = 30.0) -> None:
+        warnings.warn(
+            "LiteLLMAdapter is deprecated; use AIProviderConfig and a scoped AI provider client",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.model = model
-        self.api_key = api_key
         self.timeout = _validate_timeout(timeout)
 
     def propose_tests(self, context: Mapping[str, Any]) -> TestPlan:
-        sanitized_context = sanitize_context(context)
-        try:
-            litellm = importlib.import_module("litellm")
-        except ImportError as error:
-            raise RuntimeError("LiteLLM support requires installing openbola[ai]") from error
-        response = litellm.completion(
-            model=self.model,
-            api_key=self.api_key,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _build_user_prompt(sanitized_context)},
-            ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "openbola_test_plan",
-                    "strict": True,
-                    "schema": TestPlan.model_json_schema(),
-                },
-            },
-            temperature=0,
-            timeout=self.timeout,
+        del context
+        raise LegacyAIAdapterError(
+            "LiteLLMAdapter cannot send requests; construct AIProviderConfig and "
+            "an explicitly scoped AI provider client"
         )
-        return _plan_from_output(_litellm_content(response), sanitized_context)
-
-
-def _litellm_content(response: Any) -> str:
-    """Extract completion text without depending on LiteLLM response classes."""
-
-    choices = (
-        response.get("choices")
-        if isinstance(response, Mapping)
-        else getattr(response, "choices", None)
-    )
-    if not isinstance(choices, Sequence) or not choices:
-        raise RuntimeError("LiteLLM returned no completion choices")
-    choice = choices[0]
-    message = (
-        choice.get("message") if isinstance(choice, Mapping) else getattr(choice, "message", None)
-    )
-    content = (
-        message.get("content")
-        if isinstance(message, Mapping)
-        else getattr(message, "content", None)
-    )
-    if not isinstance(content, str):
-        raise RuntimeError("LiteLLM returned no text content")
-    return content
 
 
 class CodexCLIAdapter:
