@@ -1,0 +1,39 @@
+# Task 3 implementation report
+
+## Result
+
+Implemented explicit, scope-guarded BYOK clients in `src/openbola/ai_clients.py`.
+
+- Added `AIProviderClient`, `OpenAICompatibleClient`, `AzureOpenAIClient`, and
+  `client_for_config` with exact provider-kind matching.
+- Every provider POST is checked against the separately supplied provider
+  `ScopeGuard` before the secret is resolved or transport is called.
+- Redirects are never followed. A `Location` target is checked separately by
+  the provider guard and then a generic `ProviderRedirectError` is raised.
+- API keys are resolved only immediately after authorization and are used only
+  for the Authorization header; request payloads contain only the bounded,
+  allowlisted sanitized context and strict `ProposedPlan` JSON schema.
+- Provider URLs, timeout, headers, request size, response size, response shape,
+  and transport failures are bounded and surfaced through generic typed errors
+  without response bodies, URLs, credentials, or resolved values.
+- Added deterministic `httpx.MockTransport` coverage for successful requests,
+  denied scope, missing credentials, unsafe headers, Azure URL construction,
+  timeout bounds, malformed/oversize/error responses, redirect checks, factory
+  selection, mismatched configurations, and unsafe context rejection.
+
+## Verification
+
+```text
+uv run ruff check src/openbola/ai_clients.py tests/test_ai_clients.py
+All checks passed!
+
+uv run mypy src/openbola/ai_clients.py
+Success: no issues found in 1 source file
+
+uv run pytest tests/test_ai_clients.py tests/test_ai.py -q
+82 passed
+```
+
+## Commit
+
+Pending commit: `feat: add scope-guarded BYOK AI clients`.
