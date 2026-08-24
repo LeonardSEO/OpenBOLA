@@ -182,3 +182,6 @@ boundaries. External P11 publication actions remain separately approval-gated.
   LiteLLM migration, and privacy/redirect/fake-transport acceptance tests.
 - P5 implementation has not started; runtime dependency additions are not
   expected because existing `httpx` is reused.
+- P5 Task 1 implementation is committed as `da2d223` (report finalized in
+  `2841e48`): typed AI contracts and bounded privacy-safe context. Local tests
+  34 passed with Ruff and strict mypy; independent review is pending.
