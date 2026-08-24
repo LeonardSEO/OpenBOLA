@@ -89,7 +89,7 @@ def _fail(code: str) -> NoReturn:
 def _lstat_path(path: Path) -> os.stat_result:
     try:
         return os.lstat(path)
-    except (OSError, ValueError):
+    except (OSError, ValueError, NotImplementedError, AttributeError):
         _fail("path_denied")
 
 
@@ -1189,7 +1189,7 @@ def write_run_manifest(
         os.fsync(directory_fd)
     except ReportError:
         raise
-    except (OSError, ValueError):
+    except (OSError, ValueError, NotImplementedError, AttributeError):
         with suppress(OSError):
             os.unlink(temporary.name, dir_fd=directory_fd if directory_fd >= 0 else None)
         _fail("manifest_unavailable")
