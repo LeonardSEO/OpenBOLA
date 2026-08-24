@@ -826,15 +826,34 @@ def create_mcp_server(
     service: MCPService | None = None,
     *,
     executor: PendingExecutor | ExecutorCallable | None = None,
+    read_only: bool = False,
 ) -> Any:
-    """Create the optional FastMCP stdio server, importing FastMCP lazily."""
+    """Create the optional FastMCP stdio server, importing FastMCP lazily.
+
+    ``read_only`` is the mode used by the local administration command.  It
+    keeps the existing inspection/import/planning/report tools and exposes the
+    pending-test handler with its read-only mode, but it deliberately does not
+    accept an executor through the factory.  A factory-created service has no
+    executor in this mode, so invoking that handler cannot construct the
+    default target executor or send a request accidentally.  Callers that
+    need a read probe must provide a service which has an already-authorized,
+    injected read executor; the service's normal scope and origin checks still
+    apply.
+
+    FastMCP remains an optional dependency and is imported only when a server
+    is actually requested.  No transport is started here; the CLI/host owns
+    the explicit ``run(transport="stdio")`` call.
+    """
+
+    if read_only and executor is not None:
+        raise MCPServiceError("read-only MCP server cannot accept an executor")
 
     try:
         fastmcp_module = importlib.import_module("fastmcp")
     except ImportError as error:  # pragma: no cover - optional dependency
         raise MCPServiceError("FastMCP is unavailable; install openbola[mcp].") from error
 
-    active = service or MCPService(executor=executor)
+    active = service or MCPService(executor=None if read_only else executor)
     if service is not None and executor is not None:
         active.executor = executor
     fast_mcp: Any = fastmcp_module.FastMCP
@@ -878,6 +897,22 @@ def create_mcp_server(
         base_url: MCPPath,
         mode: Literal["read"] = "read",
     ) -> dict[str, Any]:
+        if mode != "read":
+            return {
+                "ok": False,
+                "error": "execution_denied",
+                "message": "MCP execution is read-only; mutation probes are unavailable",
+            }
+        # A read-only server created by the local command must not lazily
+        # construct ``_DefaultPendingExecutor``.  That adapter owns the
+        # target transport; only a caller that explicitly supplied an
+        # already-authorized service executor may opt into read probes.
+        if read_only and active.executor is None:
+            return {
+                "ok": False,
+                "error": "execution_denied",
+                "message": "read-only MCP server has no injected executor",
+            }
         try:
             return active.run_pending_tests(
                 base_url,
@@ -894,7 +929,7 @@ def create_mcp_server(
 
 
 def main() -> None:  # pragma: no cover - exercised by an MCP host
-    create_mcp_server().run(transport="stdio")
+    create_mcp_server(read_only=True).run(transport="stdio")
 
 
 if __name__ == "__main__":  # pragma: no cover

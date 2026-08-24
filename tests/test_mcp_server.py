@@ -4,7 +4,7 @@ import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 import pytest
@@ -557,3 +557,107 @@ def test_create_server_imports_fastmcp_lazily(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setitem(__import__("sys").modules, "fastmcp", SimpleNamespace(FastMCP=FakeServer))
     server = create_mcp_server()
     assert server.name == "openbola"
+
+
+def test_read_only_server_registers_only_safe_tools_and_uses_renamed_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RegistryServer:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.tools: dict[str, Any] = {}
+
+        def tool(self, function: Any) -> Any:
+            self.tools[function.__name__] = function
+            return function
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "fastmcp",
+        SimpleNamespace(FastMCP=RegistryServer),
+    )
+
+    server = create_mcp_server(read_only=True)
+
+    assert server.name == "openbola"
+    assert set(server.tools) == {
+        "load_scope",
+        "init_state",
+        "register_environment_credential",
+        "import_har",
+        "import_records",
+        "plan_endpoints",
+        "plan_tests",
+        "run_pending_tests",
+        "generate_report",
+    }
+    assert not {"run_mutation", "recover", "update"}.intersection(server.tools)
+
+
+def test_read_only_server_rejects_factory_executor_and_mutation_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "fastmcp",
+        SimpleNamespace(FastMCP=lambda _name: object()),
+    )
+
+    with pytest.raises(MCPServiceError, match="cannot accept an executor"):
+        create_mcp_server(executor=lambda *_args, **_kwargs: [], read_only=True)
+
+    class RegistryServer:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.tools: dict[str, Any] = {}
+
+        def tool(self, function: Any) -> Any:
+            self.tools[function.__name__] = function
+            return function
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "fastmcp",
+        SimpleNamespace(FastMCP=RegistryServer),
+    )
+    server = create_mcp_server(read_only=True)
+    result = server.tools["run_pending_tests"](
+        "https://api.example.test/v1/documents",
+        mode="mutation",
+    )
+    assert result == {
+        "ok": False,
+        "error": "execution_denied",
+        "message": "MCP execution is read-only; mutation probes are unavailable",
+    }
+
+
+def test_read_only_server_never_constructs_default_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RegistryServer:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.tools: dict[str, Any] = {}
+
+        def tool(self, function: Any) -> Any:
+            self.tools[function.__name__] = function
+            return function
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "fastmcp",
+        SimpleNamespace(FastMCP=RegistryServer),
+    )
+
+    def forbidden_default(*_args: Any, **_kwargs: Any) -> NoReturn:
+        raise AssertionError("read-only MCP registration constructed a default executor")
+
+    monkeypatch.setattr(mcp_module, "_DefaultPendingExecutor", forbidden_default)
+    server = create_mcp_server(read_only=True)
+    result = server.tools["run_pending_tests"]("https://api.example.test/v1/documents")
+    assert result == {
+        "ok": False,
+        "error": "execution_denied",
+        "message": "read-only MCP server has no injected executor",
+    }
