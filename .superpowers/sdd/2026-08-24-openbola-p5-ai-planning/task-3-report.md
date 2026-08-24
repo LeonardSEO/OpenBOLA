@@ -71,9 +71,11 @@ commits, with the hardening follow-up recorded after the base
 Final review hardening is in `48d8821 fix: reject routing headers and deep
 provider JSON`; it blocks forwarding/routing and method-override headers,
 requires ASCII header names and values, and converts deeply nested JSON
-recursion failures into the same typed response error. Final focused proof:
+recursion failures (including nested proposal content) into the same typed
+response error. The final parser containment fix is `3572e92`. Final focused
+proof:
 
 ```text
 uv run pytest tests/test_ai_clients.py tests/test_ai.py -q
-96 passed
+97 passed
 ```
