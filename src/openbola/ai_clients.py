@@ -262,6 +262,8 @@ def _request_payload(config: AIProviderConfig, context: Mapping[str, object]) ->
 def _validate_static_headers(config: AIProviderConfig) -> dict[str, str]:
     headers: dict[str, str] = {}
     for name, value in config.safe_headers.items():
+        if not isinstance(name, str):
+            raise ProviderRequestError("provider static headers contain an invalid name")
         normalized = name.casefold()
         if normalized in _BLOCKED_STATIC_HEADERS or normalized.startswith("proxy-"):
             raise ProviderRequestError("provider static headers contain a forbidden name")
@@ -347,7 +349,7 @@ class OpenAICompatibleClient:
         except Exception:
             raise ProviderRequestError("provider request is not authorized") from None
         decision = _validated_decision(raw_decision)
-        request_url = getattr(decision, "canonical_url", url)
+        request_url = decision.canonical_url
         try:
             api_key = self._secrets.resolve_secret(self._config.api_key)
         except Exception:
@@ -366,10 +368,7 @@ class OpenAICompatibleClient:
             raise ProviderCredentialError("provider credential cannot be resolved")
 
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        try:
-            headers.update(_validate_static_headers(self._config))
-        except ProviderRequestError:
-            raise
+        headers.update(_validate_static_headers(self._config))
         try:
             with httpx.Client(
                 follow_redirects=False,
