@@ -10,27 +10,39 @@ instead of ``openbola.endpoints.extract_object_ids`` (path-only, and
 inapplicable here since PostgREST paths never carry one). Only ``eq.`` is
 used for extraction in v1 -- range/membership operators (``gt.``, ``in.``,
 ``like.``, ...) don't identify a single record and are out of scope.
+Sensitive-named filter parameters (``token``, ``secret``, ``apikey``, ...)
+are never treated as record IDs even when their value is opaque-ID-shaped,
+matching ``endpoints.py``'s own guard for the structurally identical
+query-ID case. RPC calls (``POST /rest/v1/rpc/<function>``) are grouped
+per function name, not collapsed together -- each function gets its own
+``ResourceInventory`` with a real, callable ``endpoint_template``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qsl, urlsplit
 
 from openbola.discovery import (
     FieldInventory,
+    ProviderAdapter,
     ProviderConfidence,
     ProviderDetection,
     ResourceInventory,
     classify_key,
     top_level_json_keys,
 )
-from openbola.endpoints import is_object_id
+from openbola.endpoints import _is_sensitive_field, is_object_id
 from openbola.handles import InMemorySessionValueRegistry
 from openbola.models import RequestRecord
 
 _REST_PREFIX = "/rest/v1/"
 _EQ_OPERATOR = "eq."
+_RPC_SEGMENT = "rpc"
+# Detection-only: a broader operator vocabulary raises INFERRED confidence
+# for plain self-hosted PostgREST deployments. Record-ID *extraction*
+# (below, in inventory()) uses only _EQ_OPERATOR, never this tuple.
 _POSTGREST_OPERATORS = (
     "eq.",
     "neq.",
@@ -65,7 +77,10 @@ def _table_name(path: str) -> str | None:
     remainder = path[idx + len(_REST_PREFIX) :].strip("/")
     if not remainder:
         return None
-    return remainder.split("/")[0]
+    segments = remainder.split("/")
+    if segments[0] == _RPC_SEGMENT and len(segments) > 1 and segments[1]:
+        return f"{_RPC_SEGMENT}/{segments[1]}"
+    return segments[0]
 
 
 def _has_postgrest_operator(query: str) -> bool:
@@ -114,11 +129,10 @@ class SupabaseAdapter:
             origin = f"{split.scheme}://{split.netloc}"
             groups.setdefault((origin, table), []).append(record)
 
-        confidence = self.detect(records).confidence
-
         inventories: list[ResourceInventory] = []
         for origin, table in sorted(groups):
             group = groups[(origin, table)]
+            confidence = self.detect(group).confidence
             methods = frozenset(record.method.upper() for record in group)
 
             field_names: set[str] = set()
@@ -129,10 +143,10 @@ class SupabaseAdapter:
                 for key in top_level_json_keys(record.response_body):
                     classify_key(key, field_names, object_ids)
                 query = urlsplit(record.url).query
-                for _, value in parse_qsl(query, keep_blank_values=True):
+                for param_name, value in parse_qsl(query, keep_blank_values=True):
                     if value.startswith(_EQ_OPERATOR):
                         candidate = value[len(_EQ_OPERATOR) :]
-                        if is_object_id(candidate):
+                        if not _is_sensitive_field(param_name) and is_object_id(candidate):
                             object_ids.add(candidate)
 
             fields = tuple(FieldInventory(name=name) for name in sorted(field_names))
@@ -152,3 +166,12 @@ class SupabaseAdapter:
                 )
             )
         return tuple(inventories)
+
+
+if TYPE_CHECKING:
+
+    def _supabase_adapter_satisfies_provider_adapter(
+        registry: InMemorySessionValueRegistry,
+    ) -> ProviderAdapter:
+        """Static-only check: mypy fails here if SupabaseAdapter drifts from the Protocol."""
+        return SupabaseAdapter(registry)

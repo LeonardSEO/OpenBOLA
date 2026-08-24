@@ -196,10 +196,7 @@ def test_inventory_separates_multiple_tables() -> None:
     assert {inv.resource_name for inv in inventories} == {"orders", "customers"}
 
 
-def test_inventory_rpc_calls_collapse_to_a_single_rpc_pseudo_table() -> None:
-    # PostgREST RPC calls (POST /rest/v1/rpc/<function_name>) are grouped
-    # under one "rpc" resource_name rather than one per function -- a known
-    # v1 scope limitation (see the plan's Global Constraints / ledger).
+def test_inventory_rpc_calls_to_the_same_function_group_together() -> None:
     adapter = SupabaseAdapter(InMemorySessionValueRegistry())
     records = [
         _record(
@@ -208,9 +205,75 @@ def test_inventory_rpc_calls_collapse_to_a_single_rpc_pseudo_table() -> None:
             headers={"apikey": "k"},
             body=b'{"order_id": "550e8400-e29b-41d4-a716-446655440000"}',
         ),
+        _record(
+            "POST",
+            "https://xyzcompany.supabase.co/rest/v1/rpc/calculate_total",
+            headers={"apikey": "k"},
+            body=b'{"currency": "USD"}',
+        ),
     ]
     inventories = adapter.inventory(records)
     assert len(inventories) == 1
-    assert inventories[0].resource_name == "rpc"
-    assert inventories[0].endpoint_template == "/rest/v1/rpc"
-    assert {f.name for f in inventories[0].fields} == {"order_id"}
+    inv = inventories[0]
+    assert inv.resource_name == "rpc/calculate_total"
+    assert inv.endpoint_template == "/rest/v1/rpc/calculate_total"
+    assert {f.name for f in inv.fields} == {"order_id", "currency"}
+
+
+def test_inventory_confidence_does_not_bleed_across_origins() -> None:
+    adapter = SupabaseAdapter(InMemorySessionValueRegistry())
+    records = [
+        _record(
+            "GET",
+            "https://confirmed-tenant.supabase.co/rest/v1/orders?id=eq.1",
+            headers={"apikey": "k"},
+        ),
+        _record(
+            "GET",
+            "https://unconfirmed-tenant.supabase.co/rest/v1/orders?id=eq.2",
+        ),
+    ]
+    inventories = adapter.inventory(records)
+    assert len(inventories) == 2
+    by_confidence = {inv.provider_confidence for inv in inventories}
+    assert by_confidence == {ProviderConfidence.CONFIRMED, ProviderConfidence.INFERRED}
+
+
+def test_inventory_ignores_sensitive_named_eq_filters() -> None:
+    registry = InMemorySessionValueRegistry()
+    adapter = SupabaseAdapter(registry)
+    records = [
+        _record(
+            "GET",
+            "https://xyzcompany.supabase.co/rest/v1/api_keys"
+            "?secret_token=eq.opaque_secret_record_4eC39HqLyjWDarjtT1zdp7dc",
+            headers={"apikey": "k"},
+        ),
+    ]
+    inv = adapter.inventory(records)[0]
+    assert inv.record_handles == ()
+
+
+def test_inventory_rpc_calls_to_different_functions_do_not_merge() -> None:
+    registry = InMemorySessionValueRegistry()
+    adapter = SupabaseAdapter(registry)
+    records = [
+        _record(
+            "POST",
+            "https://xyzcompany.supabase.co/rest/v1/rpc/get_my_orders",
+            headers={"apikey": "k"},
+            body=b'{"limit": 10}',
+        ),
+        _record(
+            "POST",
+            "https://xyzcompany.supabase.co/rest/v1/rpc/admin_delete_user",
+            headers={"apikey": "k"},
+            body=b'{"target_user": "u1"}',
+        ),
+    ]
+    inventories = adapter.inventory(records)
+    assert len(inventories) == 2
+    by_resource = {inv.resource_name: inv for inv in inventories}
+    assert set(by_resource) == {"rpc/get_my_orders", "rpc/admin_delete_user"}
+    assert {f.name for f in by_resource["rpc/get_my_orders"].fields} == {"limit"}
+    assert {f.name for f in by_resource["rpc/admin_delete_user"].fields} == {"target_user"}
