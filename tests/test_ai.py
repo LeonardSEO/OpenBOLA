@@ -441,6 +441,30 @@ def test_validate_proposed_plan_binds_exact_candidate_and_checks_scope() -> None
 
 
 @pytest.mark.parametrize(
+    "origin",
+    [
+        "http://api.example.test",
+        "https://api.example.test/v1",
+        "https://api.example.test?scope=wrong",
+        "https://api.example.test#fragment",
+        "https://user:password@api.example.test",
+        "https://api.example.test:bad",
+        "https://api.example.test:99999",
+        "https://api.example.test:0",
+        "https://:443",
+        "https://api.example.test:",
+    ],
+)
+def test_validate_proposed_plan_rejects_malformed_target_origins(origin: str) -> None:
+    candidate = _planning_candidate()
+    plan = parse_proposed_plan(_proposed_json(candidate))
+    guard = _RecordingScopeGuard()
+    with pytest.raises(ValueError, match="target origin"):
+        validate_proposed_plan(plan, (candidate,), guard, origin)
+    assert guard.calls == []
+
+
+@pytest.mark.parametrize(
     "changes",
     [
         {"endpoint_handle": "unknown-endpoint"},

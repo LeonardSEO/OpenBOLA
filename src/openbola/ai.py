@@ -137,6 +137,43 @@ def _validate_base_url(value: object) -> str:
     return value.rstrip("/")
 
 
+def _validate_target_origin(value: object) -> str:
+    """Validate and normalize an absolute HTTPS origin without a path."""
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > _MAX_PROVIDER_URL_LENGTH
+        or any(ord(character) < 32 or character.isspace() for character in value)
+    ):
+        raise ValueError("target origin is invalid")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("target origin is invalid") from error
+    authority = parsed.netloc
+    if authority.startswith("["):
+        closing_bracket = authority.find("]")
+        has_explicit_port = closing_bracket >= 0 and len(authority) > closing_bracket + 1
+    else:
+        has_explicit_port = ":" in authority
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.netloc
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.netloc.endswith(":")
+        or (has_explicit_port and (port is None or port <= 0))
+    ):
+        raise ValueError("target origin is invalid")
+    return value.rstrip("/")
+
+
 def _validate_safe_headers(value: object) -> Mapping[str, str]:
     if not isinstance(value, Mapping):
         raise ValueError("safe_headers must be a mapping")
@@ -484,12 +521,7 @@ def validate_proposed_plan(
         raise ValueError("too many AI planning candidates")
     if not isinstance(target_scope_guard, ScopeGuard):
         raise ValueError("target scope guard must be a ScopeGuard")
-    if (
-        not isinstance(target_origin, str)
-        or not target_origin
-        or any(character.isspace() or ord(character) < 32 for character in target_origin)
-    ):
-        raise ValueError("target origin is invalid")
+    normalized_origin = _validate_target_origin(target_origin)
 
     indexed: dict[
         tuple[str, str, str, str, str, tuple[str, ...]],
@@ -524,7 +556,7 @@ def validate_proposed_plan(
         resolved.append(matches[0])
 
     for proposal, candidate in zip(plan.tests, resolved, strict=True):
-        target_url = target_origin.rstrip("/") + candidate.endpoint_template
+        target_url = normalized_origin + candidate.endpoint_template
         target_scope_guard.require_allowed(target_url, proposal.method)
     return plan
 

@@ -33,3 +33,23 @@ uv run pytest tests/test_ai.py -k 'proposed or validator or binding' -q
 ## Commit
 
 The implementation is committed as `feat: validate typed AI proposals against scope`.
+
+## Review fix
+
+The target-origin boundary now requires an absolute HTTPS origin with no
+userinfo, query, fragment, non-root path, malformed host/port, or port zero.
+The regression suite also proves the normalized origin produces the exact
+guarded target path.
+
+Additional verification after the fix:
+
+```text
+uv run ruff check src/openbola/ai.py tests/test_ai.py
+All checks passed!
+
+uv run mypy src/openbola/ai.py
+Success: no issues found in 1 source file
+
+uv run pytest tests/test_ai.py -k 'proposed or validator or binding' -q
+28 passed, 33 deselected
+```
