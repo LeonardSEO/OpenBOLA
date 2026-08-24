@@ -116,6 +116,7 @@ _CANDIDATE_KEYS = frozenset(
         "field_handles",
     }
 )
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"})
 
 
 def _safe_context(context: Mapping[str, object]) -> dict[str, object]:
@@ -158,7 +159,10 @@ def _safe_context(context: Mapping[str, object]) -> dict[str, object]:
                 not value.startswith("/")
                 or value.startswith("//")
                 or any(character in value for character in ("?", "#", "\\", "%"))
+                or any(segment in {".", ".."} for segment in value.split("/"))
             ):
+                raise ProviderRequestError("provider context is not an approved planning context")
+            if key == "method" and value not in _SAFE_METHODS:
                 raise ProviderRequestError("provider context is not an approved planning context")
             copied[key] = value
         raw_fields = candidate.get("field_handles")
@@ -265,13 +269,13 @@ class OpenAICompatibleClient:
         url = _provider_url(self._config)
         try:
             decision = self._provider_scope_guard.require_allowed(url, "POST")
-        except Exception as error:
-            raise ProviderRequestError("provider request is not authorized") from error
+        except Exception:
+            raise ProviderRequestError("provider request is not authorized") from None
         request_url = getattr(decision, "canonical_url", url)
         try:
             api_key = self._secrets.resolve_secret(self._config.api_key)
-        except Exception as error:
-            raise ProviderCredentialError("provider credential cannot be resolved") from error
+        except Exception:
+            raise ProviderCredentialError("provider credential cannot be resolved") from None
         if not isinstance(api_key, str) or not api_key or any(
             ord(character) < 32 or ord(character) == 127 for character in api_key
         ):
@@ -287,8 +291,8 @@ class OpenAICompatibleClient:
                 trust_env=False,
             ) as client:
                 response = client.post(request_url, headers=headers, json=payload)
-        except httpx.HTTPError as error:
-            raise ProviderTransportError("provider transport failed") from error
+        except httpx.HTTPError:
+            raise ProviderTransportError("provider transport failed") from None
 
         if 300 <= response.status_code < 400:
             location = response.headers.get("location")
@@ -296,15 +300,15 @@ class OpenAICompatibleClient:
                 redirect_url = urljoin(request_url, location)
                 try:
                     self._provider_scope_guard.require_allowed(redirect_url, "POST")
-                except Exception as error:
-                    raise ProviderRedirectError("provider redirect is not authorized") from error
+                except Exception:
+                    raise ProviderRedirectError("provider redirect is not authorized") from None
             raise ProviderRedirectError("provider redirects are not followed")
         if not 200 <= response.status_code < 300:
             raise ProviderResponseError("provider returned an unsuccessful response")
         try:
             raw = response.content
-        except httpx.HTTPError as error:
-            raise ProviderTransportError("provider response could not be read") from error
+        except httpx.HTTPError:
+            raise ProviderTransportError("provider response could not be read") from None
         if len(raw) > MAX_AI_OUTPUT_BYTES:
             raise ProviderResponseError("provider response exceeds the maximum safe size")
         try:

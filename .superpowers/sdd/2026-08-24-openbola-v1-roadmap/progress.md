@@ -196,3 +196,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   including invalid/zero/out-of-range ports and exact ScopeGuard path proof.
   Re-review approved; 28 focused tests, Ruff, and strict mypy pass. Task 3
   provider clients may begin.
+- P5 Task 3 implementation is committed as `d4f0d7f`: scope-guarded BYOK
+  OpenAI-compatible/Azure clients with fake-transport privacy, redirect,
+  bounds, and error tests. Implementer reports 82 combined AI/client tests
+  passed with Ruff/mypy; independent review is pending.
