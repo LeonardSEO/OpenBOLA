@@ -218,8 +218,7 @@ plans before it.
     Windows CI; this plan produces the build config and macOS-side
     verification, not a cross-compiled Windows artifact.*
 11. **P11 — Visual design & GitHub launch**. README hero/badges/demo,
-    social-preview image, repository rename/topics/security URL. **Local launch
-    materials complete; external GitHub launch pending approval.** The
+    social-preview image, repository rename/topics/security URL. **P11 local launch materials complete; external GitHub launch pending approval.** The
     approval-gated checklist is [docs/launch/github-launch-checklist.md](../../launch/github-launch-checklist.md);
     no publish/transfer/rename/release action is claimed here. The spec itself
     (§12) requires separate explicit approval at execution time.

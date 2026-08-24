@@ -205,7 +205,6 @@ Record only:
 - read-only command results and bounded GitHub settings screenshots/URLs;
 - abort reason and preserved local/remote state for any failed postcondition.
 
-The local P11 state remains **local materials complete; external GitHub launch
-pending approval** until every approved mutation has its own postcondition and
+The roadmap marker is **P11 local launch materials complete; external GitHub launch pending approval** until every approved mutation has its own postcondition and
 evidence. Native Windows x64 and macOS x64/arm64 clean-machine acceptance is
 also unverified until P10 artifacts run on their respective machines or CI.
