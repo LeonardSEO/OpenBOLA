@@ -3,16 +3,44 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 from rich.console import Console
 
+from openbola import __version__
 from openbola.pipeline import IdentityInput, PipelineError, PipelineResult, run_pipeline
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 console = Console()
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """Bounded result shared by administration command adapters."""
+
+    ok: bool
+    code: str
+    details: dict[str, str | int | bool]
+
+
+def _emit_command_error(code: str, *, json_output: bool) -> NoReturn:
+    """Emit a stable, secret-free error and terminate with the admin code."""
+
+    result = CommandResult(False, code, {})
+    if json_output:
+        typer.echo(json.dumps({"ok": result.ok, "error": result.code}, separators=(",", ":")))
+    else:
+        console.print("[bold red]commando geweigerd[/bold red]")
+    raise typer.Exit(code=2)
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit()
 
 
 def _assignment(value: str, label: str) -> tuple[str, str]:
@@ -104,9 +132,72 @@ def scan(
         raise typer.Exit(code=2) from error
 
 
+@app.command("setup")
+def setup_command(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+    force_browser: Annotated[bool, typer.Option("--force-browser")] = False,
+) -> None:
+    """Prepare local browser and vault prerequisites."""
+
+    del force_browser
+    _emit_command_error("setup_unavailable", json_output=json_output)
+
+
+@app.command("doctor")
+def doctor_command(
+    db: Annotated[Path | None, typer.Option("--db")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Inspect local installation and recovery state without probing a target."""
+
+    del db
+    _emit_command_error("diagnostics_blocked", json_output=json_output)
+
+
+@app.command("report")
+def report_command(
+    run: Annotated[str, typer.Argument()],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+    format_name: Annotated[str, typer.Option("--format")] = "json",
+) -> None:
+    """Reopen an existing sanitized report run."""
+
+    del run, format_name
+    _emit_command_error("report_denied", json_output=json_output)
+
+
+@app.command("update")
+def update_command(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+    check: Annotated[bool, typer.Option("--check")] = False,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+    force_check: Annotated[bool, typer.Option("--force-check")] = False,
+) -> None:
+    """Check for or explicitly apply a verified release update."""
+
+    del check, yes, force_check
+    _emit_command_error("update_denied", json_output=json_output)
+
+
+@app.command("mcp")
+def mcp_command(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Start the local read-only MCP server."""
+
+    _emit_command_error("mcp_unavailable", json_output=json_output)
+
+
 @app.callback()
-def main() -> None:
+def main(
+    version: Annotated[
+        bool,
+        typer.Option("--version", callback=_version_callback, is_eager=True),
+    ] = False,
+) -> None:
     """OpenBOLA: authorization-first BOLA/IDOR testing."""
+
+    del version
 
 
 if __name__ == "__main__":  # pragma: no cover

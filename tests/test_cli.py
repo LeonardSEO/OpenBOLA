@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 from typer.testing import CliRunner
 
+from openbola import __version__
 from openbola.cli import app
 from openbola.mock_target import DEMO_OBJECT_ID, MockTarget
 
@@ -279,3 +280,20 @@ def test_cli_json_rejects_deep_records_without_traceback(tmp_path: Path) -> None
     )
     assert result.exit_code == 2
     assert json.loads(result.stdout) == {"ok": False, "error": "scan_denied"}
+
+
+def test_admin_commands_and_version_are_registered_without_secrets() -> None:
+    runner = CliRunner()
+    version = runner.invoke(app, ["--version"])
+    assert version.exit_code == 0
+    assert version.stdout.strip() == __version__
+
+    help_result = runner.invoke(app, ["--help"])
+    assert help_result.exit_code == 0
+    for command in ("setup", "doctor", "report", "update", "mcp"):
+        assert command in help_result.stdout
+
+    result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == {"ok": False, "error": "diagnostics_blocked"}
+    assert "SECRET" not in result.stdout
