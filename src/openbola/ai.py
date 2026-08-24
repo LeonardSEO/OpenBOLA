@@ -7,13 +7,19 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from enum import StrEnum
 from numbers import Real
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from types import MappingProxyType
+from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from openbola.handles import SecretHandle
+
 MAX_SUGGESTIONS = 10
+MAX_PROPOSED_TESTS = MAX_SUGGESTIONS
 MAX_AI_OUTPUT_BYTES = 32 * 1024
 MAX_CONTEXT_BYTES = 16 * 1024
 MAX_ENDPOINT_PATTERNS = 50
@@ -30,6 +36,13 @@ _SENSITIVE_NAME_PARTS = (
     "apikey", "token", "secret", "password", "passwd", "auth", "cookie",
     "session", "credential", "bearer", "privatekey",
 )
+_MAX_HANDLE_LENGTH = 256
+_MAX_MODEL_LENGTH = 128
+_MAX_PROVIDER_URL_LENGTH = 2048
+_MAX_HEADER_NAME_LENGTH = 128
+_MAX_HEADER_VALUE_LENGTH = 512
+_MAX_RATIONALE_LENGTH = 240
+_SAFE_HEADER_NAME_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")
 
 
 class HTTPMethod(StrEnum):
@@ -51,6 +64,281 @@ class ObjectIDLocation(StrEnum):
     QUERY_PARAM = "query_param"
     BODY_NESTED = "body_nested"
     GRAPHQL_FIELD = "graphql_field"
+
+
+def _validate_opaque_handle(value: object, *, field_name: str) -> str:
+    """Validate a handle without interpreting or deriving its value."""
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > _MAX_HANDLE_LENGTH
+        or any(ord(character) < 32 or character.isspace() for character in value)
+    ):
+        raise ValueError(f"{field_name} must be a non-empty opaque handle")
+    return value
+
+
+def _normalise_contract_method(value: object) -> str:
+    method = _normalise_method(value)
+    if method is None:
+        raise ValueError("method must be a supported HTTP method")
+    return method
+
+
+def _normalise_field_handles(value: object) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ValueError("field_handles must be a sequence of opaque handles")
+    handles = tuple(
+        _validate_opaque_handle(item, field_name="field handle")
+        for item in value
+    )
+    if len(set(handles)) != len(handles):
+        raise ValueError("field_handles must not contain duplicates")
+    return handles
+
+
+def _validate_text(value: object, *, field_name: str, maximum: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > maximum
+        or any(ord(character) < 32 or character.isspace() for character in value)
+    ):
+        raise ValueError(f"{field_name} must be non-empty and bounded")
+    return value
+
+
+def _validate_base_url(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > _MAX_PROVIDER_URL_LENGTH
+        or any(ord(character) < 32 or character.isspace() for character in value)
+    ):
+        raise ValueError("provider base_url must be an HTTPS origin")
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        _port = parsed.port
+    except ValueError as error:
+        raise ValueError("provider base_url must be an HTTPS origin") from error
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.netloc
+        or hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("provider base_url must be an HTTPS origin")
+    return value.rstrip("/")
+
+
+def _validate_safe_headers(value: object) -> Mapping[str, str]:
+    if not isinstance(value, Mapping):
+        raise ValueError("safe_headers must be a mapping")
+    headers: dict[str, str] = {}
+    for name, header_value in value.items():
+        if (
+            not isinstance(name, str)
+            or not name
+            or len(name) > _MAX_HEADER_NAME_LENGTH
+            or _SAFE_HEADER_NAME_RE.fullmatch(name) is None
+            or _is_sensitive_name(name)
+        ):
+            raise ValueError("safe_headers contains an unsafe header name")
+        if (
+            not isinstance(header_value, str)
+            or len(header_value) > _MAX_HEADER_VALUE_LENGTH
+            or any(ord(character) < 32 or ord(character) == 127 for character in header_value)
+        ):
+            raise ValueError("safe_headers contains an unsafe header value")
+        headers[name] = header_value
+    return MappingProxyType(headers)
+
+
+@dataclass(frozen=True)
+class AIProviderConfig:
+    """Configuration for a BYOK provider; it does not grant network authority."""
+
+    kind: Literal["openai_compatible", "azure_openai"]
+    base_url: str
+    model: str
+    api_key: SecretHandle
+    azure_deployment: str | None = None
+    api_version: str | None = None
+    safe_headers: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"openai_compatible", "azure_openai"}:
+            raise ValueError("provider kind is unsupported")
+        object.__setattr__(self, "base_url", _validate_base_url(self.base_url))
+        object.__setattr__(
+            self,
+            "model",
+            _validate_text(self.model, field_name="model", maximum=_MAX_MODEL_LENGTH),
+        )
+        if not isinstance(self.api_key, SecretHandle):
+            raise ValueError("api_key must be a SecretHandle")
+        _validate_opaque_handle(self.api_key.id, field_name="api_key id")
+        _validate_text(self.api_key.purpose, field_name="api_key purpose", maximum=128)
+
+        if self.kind == "azure_openai":
+            if self.azure_deployment is None or self.api_version is None:
+                raise ValueError("Azure provider requires deployment and API version")
+            object.__setattr__(
+                self,
+                "azure_deployment",
+                _validate_text(
+                    self.azure_deployment,
+                    field_name="azure deployment",
+                    maximum=_MAX_MODEL_LENGTH,
+                ),
+            )
+            object.__setattr__(
+                self,
+                "api_version",
+                _validate_text(
+                    self.api_version,
+                    field_name="API version",
+                    maximum=_MAX_MODEL_LENGTH,
+                ),
+            )
+        elif self.azure_deployment is not None or self.api_version is not None:
+            raise ValueError("Azure settings are only valid for the Azure provider")
+
+        object.__setattr__(self, "safe_headers", _validate_safe_headers(self.safe_headers))
+
+
+@dataclass(frozen=True)
+class PlanningCandidate:
+    """Sanitized observed candidate containing handles but no resolved values."""
+
+    endpoint_handle: str
+    owner_identity_handle: str
+    attacker_identity_handle: str
+    record_handle: str
+    endpoint_template: str
+    method: str
+    field_handles: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "endpoint_handle",
+            "owner_identity_handle",
+            "attacker_identity_handle",
+            "record_handle",
+        ):
+            _validate_opaque_handle(getattr(self, field_name), field_name=field_name)
+        if not isinstance(self.endpoint_template, str) or not _is_safe_endpoint_template(
+            self.endpoint_template
+        ):
+            raise ValueError("endpoint_template must be a relative path template")
+        object.__setattr__(self, "method", _normalise_contract_method(self.method))
+        object.__setattr__(self, "field_handles", _normalise_field_handles(self.field_handles))
+
+
+@dataclass(frozen=True)
+class ProposedTest:
+    """A typed AI proposal that remains non-executable until later validation."""
+
+    endpoint_handle: str
+    owner_identity_handle: str
+    attacker_identity_handle: str
+    record_handle: str
+    method: str
+    field_handles: tuple[str, ...]
+    rationale: str
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "endpoint_handle",
+            "owner_identity_handle",
+            "attacker_identity_handle",
+            "record_handle",
+        ):
+            _validate_opaque_handle(getattr(self, field_name), field_name=field_name)
+        object.__setattr__(self, "method", _normalise_contract_method(self.method))
+        object.__setattr__(self, "field_handles", _normalise_field_handles(self.field_handles))
+        rationale = self.rationale
+        if (
+            not isinstance(rationale, str)
+            or not rationale.strip()
+            or len(rationale) > _MAX_RATIONALE_LENGTH
+            or "\n" in rationale
+            or "\r" in rationale
+        ):
+            raise ValueError("rationale must be concise and bounded")
+        object.__setattr__(self, "rationale", rationale.strip())
+
+
+@dataclass(frozen=True)
+class ProposedPlan:
+    """Bounded collection of typed proposals; never contains resolved values."""
+
+    tests: tuple[ProposedTest, ...]
+
+    def __post_init__(self) -> None:
+        if isinstance(self.tests, (str, bytes)) or not isinstance(self.tests, Sequence):
+            raise ValueError("tests must be a sequence")
+        tests = tuple(self.tests)
+        if len(tests) > MAX_PROPOSED_TESTS:
+            raise ValueError("plan contains too many tests")
+        if any(not isinstance(test, ProposedTest) for test in tests):
+            raise ValueError("plan contains an invalid test")
+        object.__setattr__(self, "tests", tests)
+
+
+def build_sanitized_context(
+    candidates: Sequence[PlanningCandidate],
+) -> dict[str, object]:
+    """Build the allowlisted, bounded context sent to a planning provider."""
+
+    if isinstance(candidates, (str, bytes)) or not isinstance(candidates, Sequence):
+        raise ValueError("planning candidates must be a sequence")
+    if len(candidates) > MAX_CANDIDATES:
+        raise ValueError("too many planning candidates")
+    normalized: set[PlanningCandidate] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, PlanningCandidate):
+            raise ValueError("planning candidates must be typed values")
+        normalized.add(candidate)
+    ordered = sorted(
+        normalized,
+        key=lambda candidate: (
+            candidate.endpoint_handle,
+            candidate.owner_identity_handle,
+            candidate.attacker_identity_handle,
+            candidate.record_handle,
+            candidate.method,
+            candidate.field_handles,
+        ),
+    )
+    payload_candidates = [
+        {
+            "endpoint_handle": candidate.endpoint_handle,
+            "owner_identity_handle": candidate.owner_identity_handle,
+            "attacker_identity_handle": candidate.attacker_identity_handle,
+            "record_handle": candidate.record_handle,
+            "endpoint_template": candidate.endpoint_template,
+            "method": candidate.method,
+            "field_handles": list(candidate.field_handles),
+        }
+        for candidate in ordered
+    ]
+    context: dict[str, object] = {
+        "schema": "openbola-ai-context-v1",
+        "candidates": payload_candidates,
+    }
+    try:
+        serialized = json.dumps(context, ensure_ascii=True, separators=(",", ":"))
+    except (TypeError, ValueError) as error:
+        raise ValueError("planning context cannot be serialized") from error
+    if len(serialized.encode("utf-8")) > MAX_CONTEXT_BYTES:
+        raise ValueError("AI context exceeds the maximum safe size")
+    return context
 
 
 class TestSuggestion(BaseModel):

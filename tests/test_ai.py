@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import FrozenInstanceError, fields, is_dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,20 +10,152 @@ import pytest
 
 from openbola.ai import (
     MAX_AI_OUTPUT_BYTES,
+    MAX_CONTEXT_BYTES,
+    MAX_PROPOSED_TESTS,
     MAX_PROVIDER_TIMEOUT_SECONDS,
+    AIProviderConfig,
     CodexCLIAdapter,
     CodexCLIAdapterDisabledError,
     HTTPMethod,
     LiteLLMAdapter,
     ObjectIDLocation,
+    PlanningCandidate,
+    ProposedPlan,
+    ProposedTest,
     TestPlan,
     _parse_test_plan,
+    build_sanitized_context,
     sanitize_context,
     validate_plan_for_context,
 )
 from openbola.capture import InSessionCapture
 from openbola.discovery import GenericAdapter
-from openbola.handles import InMemorySessionValueRegistry
+from openbola.handles import InMemorySessionValueRegistry, SecretHandle
+
+
+def _planning_candidate(**overrides: Any) -> PlanningCandidate:
+    values: dict[str, Any] = {
+        "endpoint_handle": "ep-opaque",
+        "owner_identity_handle": "owner-opaque",
+        "attacker_identity_handle": "attacker-opaque",
+        "record_handle": "record-opaque",
+        "endpoint_template": "/v1/documents/{id}",
+        "method": "GET",
+        "field_handles": ("field-opaque",),
+    }
+    values.update(overrides)
+    return PlanningCandidate(**values)
+
+
+def test_typed_contracts_are_frozen_dataclasses_and_context_is_private() -> None:
+    raw_id = "raw-record-id-sentinel"
+    full_value = "full-response-value-sentinel"
+    cookie = "cookie-sentinel"
+    api_key = "api-key-sentinel"
+    candidate = _planning_candidate()
+    context = build_sanitized_context((candidate, candidate))
+    rendered = json.dumps(context, sort_keys=True, separators=(",", ":"))
+
+    assert context.keys() == {"schema", "candidates"}
+    assert rendered.count("ep-opaque") == 1
+    for sentinel in (raw_id, full_value, cookie, api_key):
+        assert sentinel not in rendered
+    assert "cookie" not in rendered.casefold()
+    assert len(rendered.encode()) <= MAX_CONTEXT_BYTES
+
+    proposal = ProposedTest(
+        endpoint_handle="ep-opaque",
+        owner_identity_handle="owner-opaque",
+        attacker_identity_handle="attacker-opaque",
+        record_handle="record-opaque",
+        method="get",
+        field_handles=("field-opaque",),
+        rationale="Check the observed ownership boundary.",
+    )
+    contracts = (
+        AIProviderConfig(
+            kind="openai_compatible",
+            base_url="https://llm.example.test/v1",
+            model="test-model",
+            api_key=SecretHandle(id="secret-handle", purpose="provider_api_key"),
+        ),
+        candidate,
+        proposal,
+        ProposedPlan((proposal,)),
+    )
+    for contract in contracts:
+        assert is_dataclass(contract)
+        assert all(
+            parameter.name not in {"url", "body", "headers"}
+            for parameter in fields(contract)
+        )
+        with pytest.raises(FrozenInstanceError):
+            setattr(contract, fields(contract)[0].name, None)
+
+
+def test_planning_context_sorts_and_deduplicates_candidates() -> None:
+    first = _planning_candidate(endpoint_handle="ep-b")
+    second = _planning_candidate(endpoint_handle="ep-a", method="POST")
+
+    context = build_sanitized_context((first, second, first))
+
+    assert context["candidates"] == [
+        {
+            "endpoint_handle": "ep-a",
+            "owner_identity_handle": "owner-opaque",
+            "attacker_identity_handle": "attacker-opaque",
+            "record_handle": "record-opaque",
+            "endpoint_template": "/v1/documents/{id}",
+            "method": "POST",
+            "field_handles": ["field-opaque"],
+        },
+        {
+            "endpoint_handle": "ep-b",
+            "owner_identity_handle": "owner-opaque",
+            "attacker_identity_handle": "attacker-opaque",
+            "record_handle": "record-opaque",
+            "endpoint_template": "/v1/documents/{id}",
+            "method": "GET",
+            "field_handles": ["field-opaque"],
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: _planning_candidate(endpoint_template="https://example.test/documents"),
+        lambda: _planning_candidate(endpoint_template="/documents?token=secret"),
+        lambda: _planning_candidate(endpoint_template="/documents#fragment"),
+        lambda: _planning_candidate(field_handles=("field-opaque", "field-opaque")),
+        lambda: _planning_candidate(record_handle=""),
+        lambda: _planning_candidate(method="CONNECT"),
+    ],
+)
+def test_planning_candidate_rejects_unsafe_values(factory: Any) -> None:
+    with pytest.raises(ValueError):
+        factory()
+
+
+def test_proposed_contract_bounds_and_provider_url_validation() -> None:
+    with pytest.raises(ValueError):
+        ProposedTest(
+            endpoint_handle="ep",
+            owner_identity_handle="owner",
+            attacker_identity_handle="attacker",
+            record_handle="record",
+            method="GET",
+            field_handles=(),
+            rationale="x" * 241,
+        )
+    assert MAX_PROPOSED_TESTS == 10
+    with pytest.raises(ValueError):
+        AIProviderConfig(
+            kind="openai_compatible",
+            base_url="http://llm.example.test",
+            model="model",
+            api_key=SecretHandle(id="secret", purpose="api_key"),
+        )
 
 
 def _context() -> dict[str, Any]:
