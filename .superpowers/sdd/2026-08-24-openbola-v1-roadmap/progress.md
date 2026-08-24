@@ -252,3 +252,9 @@ boundaries. External P11 publication actions remain separately approval-gated.
   legacy adapter preserve `serialize_evidence` compatibility without allowing
   legacy data to imply write/delete proof. Independent review approved Task 1:
   18 focused tests, full pytest 498, Ruff and strict mypy pass.
+- P7 Task 2 is committed as `0574607` (reporting boundary report included).
+  `ReportBundle` normalizes legacy findings without retaining source mappings,
+  validates and deterministically orders `ResourceReport` values, and exposes
+  the typed `canonical_report_document()` with schema id
+  `openbola-report-v1`/version 1. Independent review approved Task 2: 20
+  focused reporting/boundary tests, full pytest 500, Ruff and strict mypy pass.
