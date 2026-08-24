@@ -10,6 +10,7 @@ subprocess, network, or operating-system vault.
 
 from __future__ import annotations
 
+import hmac
 import importlib
 import importlib.util
 import inspect
@@ -353,6 +354,12 @@ def _run_vault_self_test(vault: object) -> None:
         # accessible after creation.  Do not compare or expose the key.
         second: Any = method()
         if isinstance(second, bytes) and len(second) != _RECOVERY_KEY_BYTES:
+            raise SetupError("vault_unavailable")
+        if (
+            isinstance(candidate, bytes)
+            and isinstance(second, bytes)
+            and not hmac.compare_digest(candidate, second)
+        ):
             raise SetupError("vault_unavailable")
         del second
     else:
