@@ -245,3 +245,10 @@ boundaries. External P11 publication actions remain separately approval-gated.
   bounded exchange type. Scope provenance is exposed by `c1e9e36` for the
   in-process plan boundary. Independent review approved Task 2: 58 focused
   tests, 60 repeated sweep runs, full pytest 495, Ruff and strict mypy pass.
+- P7 executable plan is committed as `ceedede`; its typed reporting boundary
+  is now implemented in Task 1 as `71188ce` (report `task-1-report.md`). The
+  immutable `FindingEvidence`/`CapabilityProof`/resource contracts, hashed
+  identity references, bounded endpoint/status/text validation, and fail-closed
+  legacy adapter preserve `serialize_evidence` compatibility without allowing
+  legacy data to imply write/delete proof. Independent review approved Task 1:
+  18 focused tests, full pytest 498, Ruff and strict mypy pass.
