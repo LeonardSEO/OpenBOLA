@@ -278,3 +278,39 @@ boundaries. External P11 publication actions remain separately approval-gated.
   `mcp`), stable `--version`, and secret-free error mapping while preserving
   `scan`. Independent review approved it with 6 CLI tests, Ruff, and mypy.
   The no-argument TUI launch remains intentionally deferred to P8.
+- P9 Task 2 setup service is complete across `5758c62`, `00fa464`, `557c05a`,
+  `06ac3d6`, and `2f0be3f`: vault/browser preparation is bounded, atomic, and
+  literal-success-only. Independent review approved 16 setup tests plus the
+  related capture suite, with Ruff/mypy green.
+- P9 Task 3 doctor service is complete across `9803586`, `b2e8ee0`,
+  `37865dd`, `58cc976`, `247fbfa`, `d8c3d64`, and `650dfa3`, with reports in
+  `933be39`, `d4b1570`, and `a2b7513`. Independent review approved 15 doctor
+  tests, 72 related tests, and Ruff/mypy; unsafe paths, probes, and statuses
+  fail closed without exposing details.
+- P9 Task 6 local MCP service is complete in `a7588a7` and `c31d78e`.
+  Independent review approved 31 CLI/MCP tests with Ruff/mypy; read-only mode
+  has no executor and transport/import failures map to a bounded code.
+- P9 Task 4 report reopening is complete across `5ca938f`, `17071a4`,
+  `e9a6af9`, and `f898188`: numeric runs resolve through immutable read-only
+  SQLite, all six sanitized artifacts are bounded and schema-validated, and
+  pipeline/CLI integration writes and reopens manifests without side effects.
+  Independent review approved malformed, stale, secret-like, symlinked, and
+  sidecar-mutation refusal paths.
+- P9 Task 5 update service is complete across `76bfecc`, `947d9ac`, `a3d3154`,
+  and `3cca738`: exact scoped release traffic, strict GitHub metadata, pinned
+  transport fail-closed behavior, verified P10 archive extraction, adjacent
+  executable manifests, and bounded malformed-reader failures. Independent
+  review approved 29 update tests with Ruff and strict mypy.
+- P9 CLI setup/doctor integration is included in `c478d58` with focused
+  coverage in `e9a6af9`; the combined P9 CLI/setup/doctor/report/update/MCP
+  subset is green.
+- P10 local packaging is complete across `c478d58`, `1d9cb65`, `eb28533`, and
+  `8a02f14`: native specs, deterministic archives, checksum-verifying
+  installers, guarded workflow with verified action pins, source/version gates,
+  and digest validation. Native macOS arm64 smoke passed; Windows x64,
+  macOS x64, and clean-machine acceptance remain CI/real-machine evidence.
+- P11 local launch materials are complete across `90d31c9`, `073e6ca`,
+  `8bffda3`, `2179ab6`, and `f0f5e96`: offline artwork, deterministic demo,
+  validators, and an approval-gated GitHub checklist. External rename,
+  transfer, release, topics, security URL, and social-preview publication
+  remain pending explicit approval.
