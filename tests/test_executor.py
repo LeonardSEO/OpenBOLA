@@ -12,16 +12,16 @@ import httpx
 import pytest
 import yaml
 
-from bola_checker.credentials import CredentialVault
-from bola_checker.executor import (
+from openbola.credentials import CredentialVault
+from openbola.executor import (
     ExecutorLimits,
     MutationSafetyError,
     MutationSpec,
     ProbeExecutor,
 )
-from bola_checker.models import CredentialKind, ProbeMode, ProbeTarget, Verdict
-from bola_checker.scope import ScopeGuard
-from bola_checker.state import StateStore
+from openbola.models import CredentialKind, ProbeMode, ProbeTarget, Verdict
+from openbola.scope import ScopeGuard
+from openbola.state import StateStore
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 

@@ -8,8 +8,8 @@ from pathlib import Path
 import yaml
 from typer.testing import CliRunner
 
-from bola_checker.cli import app
-from bola_checker.mock_target import DEMO_OBJECT_ID, MockTarget
+from openbola.cli import app
+from openbola.mock_target import DEMO_OBJECT_ID, MockTarget
 
 
 def _scope(path: Path) -> Path:

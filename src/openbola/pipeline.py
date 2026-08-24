@@ -21,18 +21,18 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from bola_checker.capture import CaptureError, parse_har_records
-from bola_checker.credentials import CredentialVault
-from bola_checker.endpoints import (
+from openbola.capture import CaptureError, parse_har_records
+from openbola.credentials import CredentialVault
+from openbola.endpoints import (
     CandidateLocation,
     build_test_targets,
     correlate_ownership,
     discover_endpoint_candidates,
     executable_ownership,
 )
-from bola_checker.executor import ExecutorLimits, ProbeExecutor
-from bola_checker.extract import extract_requests
-from bola_checker.models import (
+from openbola.executor import ExecutorLimits, ProbeExecutor
+from openbola.extract import extract_requests
+from openbola.models import (
     CredentialKind,
     CredentialRef,
     ProbeMode,
@@ -41,9 +41,9 @@ from bola_checker.models import (
     RequestRecord,
     Verdict,
 )
-from bola_checker.reporting import ReportBundle, write_reports
-from bola_checker.scope import ScopeError, ScopeGuard
-from bola_checker.state import StateStore, canonical_finding_text, object_ref_fingerprint
+from openbola.reporting import ReportBundle, write_reports
+from openbola.scope import ScopeError, ScopeGuard
+from openbola.state import StateStore, canonical_finding_text, object_ref_fingerprint
 
 _SAFE_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _REDACTED = "[REDACTED]"
@@ -553,7 +553,7 @@ def run_pipeline(
     pending = tuple(store.untested_combinations())
     endpoints = {int(item["id"]): item for item in store.list_endpoints()}
     identities_by_id = {int(item["id"]): item for item in store.list_identities()}
-    run_label = "run_" + hashlib.sha256(b"bolacheck-pipeline").hexdigest()
+    run_label = "run_" + hashlib.sha256(b"openbola-pipeline").hexdigest()
     run_id = store.start_run(run_label)
     executor = ProbeExecutor(
         guard,
@@ -615,7 +615,7 @@ def run_pipeline(
                 method=target.method,
                 evidence=evidence,
             )
-            from bola_checker.models import Finding
+            from openbola.models import Finding
 
             store.add_finding(
                 Finding(

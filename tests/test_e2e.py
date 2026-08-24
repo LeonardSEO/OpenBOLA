@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from bola_checker.mock_target import DEMO_OBJECT_ID, MockTarget
-from bola_checker.models import RequestRecord, Verdict
-from bola_checker.pipeline import IdentityInput, PipelineError, run_pipeline
+from openbola.mock_target import DEMO_OBJECT_ID, MockTarget
+from openbola.models import RequestRecord, Verdict
+from openbola.pipeline import IdentityInput, PipelineError, run_pipeline
 
 
 def _scope(
@@ -22,7 +22,7 @@ def _scope(
 ) -> Path:
     now = datetime.now(UTC)
     document = {
-        "client_name": "BOLACheck local E2E",
+        "client_name": "OpenBOLA local E2E",
         "authorization_reference": "LOCAL-E2E-AUTHZ",
         "confirmed": confirmed,
         "starts_at": (now - timedelta(minutes=1)).isoformat(),

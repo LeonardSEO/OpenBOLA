@@ -2,7 +2,7 @@
 
 ## Project
 
-BOLACheck is an open-source, authorization-first BOLA/IDOR testing tool. It
+OpenBOLA is an open-source, authorization-first BOLA/IDOR testing tool. It
 captures or imports traffic from two or more identities, establishes object
 ownership from explicit evidence, and compares authorized versus unauthorized
 access without allowing an AI model to send network traffic.

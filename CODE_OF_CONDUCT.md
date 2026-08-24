@@ -2,7 +2,7 @@
 
 ## Our standard
 
-We want BOLACheck to be a welcoming, technically rigorous community. Treat
+We want OpenBOLA to be a welcoming, technically rigorous community. Treat
 people with respect, assume good faith, and focus criticism on the code,
 evidence, and safety impact rather than on individuals.
 

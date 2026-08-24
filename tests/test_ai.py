@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from bola_checker.ai import (
+from openbola.ai import (
     MAX_AI_OUTPUT_BYTES,
     MAX_PROVIDER_TIMEOUT_SECONDS,
     CodexCLIAdapter,

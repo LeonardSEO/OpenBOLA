@@ -1,4 +1,4 @@
-from bola_checker.models import CredentialKind, CredentialRef
+from openbola.models import CredentialKind, CredentialRef
 
 
 def test_credential_ref_repr_does_not_contain_secret_value() -> None:

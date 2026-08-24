@@ -233,64 +233,6 @@ wheels = [
 ]
 
 [[package]]
-name = "bolacheck"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "httpx" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-    { name = "rich" },
-    { name = "typer" },
-]
-
-[package.optional-dependencies]
-ai = [
-    { name = "litellm" },
-]
-all = [
-    { name = "fastmcp" },
-    { name = "litellm" },
-    { name = "playwright" },
-]
-capture = [
-    { name = "playwright" },
-]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "respx" },
-    { name = "ruff" },
-    { name = "types-pyyaml" },
-]
-mcp = [
-    { name = "fastmcp" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastmcp", marker = "extra == 'all'", specifier = ">=2,<4" },
-    { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=2,<4" },
-    { name = "httpx", specifier = ">=0.27,<1" },
-    { name = "litellm", marker = "extra == 'ai'", specifier = ">=1.50,<2" },
-    { name = "litellm", marker = "extra == 'all'", specifier = ">=1.50,<2" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13,<2" },
-    { name = "playwright", marker = "extra == 'all'", specifier = ">=1.48,<2" },
-    { name = "playwright", marker = "extra == 'capture'", specifier = ">=1.48,<2" },
-    { name = "pydantic", specifier = ">=2.8,<3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<9" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5,<8" },
-    { name = "pyyaml", specifier = ">=6,<7" },
-    { name = "respx", marker = "extra == 'dev'", specifier = ">=0.22,<1" },
-    { name = "rich", specifier = ">=13,<15" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8,<1" },
-    { name = "typer", specifier = ">=0.12,<1" },
-    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6,<7" },
-]
-provides-extras = ["ai", "mcp", "capture", "all", "dev"]
-
-[[package]]
 name = "boto3"
 version = "1.43.78"
 source = { registry = "https://pypi.org/simple" }
@@ -2038,6 +1980,64 @@ sdist = { url = "https://files.pythonhosted.org/packages/02/2e/58d83848dd1a79cb9
 wheels = [
     { url = "https://files.pythonhosted.org/packages/12/cf/03675d8bd8ecbf4445504d8071adab19f5f993676795708e36402ab38263/openapi_pydantic-0.5.1-py3-none-any.whl", hash = "sha256:a3a09ef4586f5bd760a8df7f43028b60cafb6d9f61de2acba9574766255ab146", size = 96381, upload-time = "2025-01-08T19:29:25.275Z" },
 ]
+
+[[package]]
+name = "openbola"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "rich" },
+    { name = "typer" },
+]
+
+[package.optional-dependencies]
+ai = [
+    { name = "litellm" },
+]
+all = [
+    { name = "fastmcp" },
+    { name = "litellm" },
+    { name = "playwright" },
+]
+capture = [
+    { name = "playwright" },
+]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "respx" },
+    { name = "ruff" },
+    { name = "types-pyyaml" },
+]
+mcp = [
+    { name = "fastmcp" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastmcp", marker = "extra == 'all'", specifier = ">=2,<4" },
+    { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=2,<4" },
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "litellm", marker = "extra == 'ai'", specifier = ">=1.50,<2" },
+    { name = "litellm", marker = "extra == 'all'", specifier = ">=1.50,<2" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13,<2" },
+    { name = "playwright", marker = "extra == 'all'", specifier = ">=1.48,<2" },
+    { name = "playwright", marker = "extra == 'capture'", specifier = ">=1.48,<2" },
+    { name = "pydantic", specifier = ">=2.8,<3" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<9" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5,<8" },
+    { name = "pyyaml", specifier = ">=6,<7" },
+    { name = "respx", marker = "extra == 'dev'", specifier = ">=0.22,<1" },
+    { name = "rich", specifier = ">=13,<15" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8,<1" },
+    { name = "typer", specifier = ">=0.12,<1" },
+    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6,<7" },
+]
+provides-extras = ["ai", "mcp", "capture", "all", "dev"]
 
 [[package]]
 name = "opentelemetry-api"

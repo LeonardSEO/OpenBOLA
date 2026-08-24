@@ -425,7 +425,7 @@ class LiteLLMAdapter:
         try:
             litellm = importlib.import_module("litellm")
         except ImportError as error:
-            raise RuntimeError("LiteLLM support requires installing bolacheck[ai]") from error
+            raise RuntimeError("LiteLLM support requires installing openbola[ai]") from error
         response = litellm.completion(
             model=self.model,
             api_key=self.api_key,
@@ -436,7 +436,7 @@ class LiteLLMAdapter:
             response_format={
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "bolacheck_test_plan",
+                    "name": "openbola_test_plan",
                     "strict": True,
                     "schema": TestPlan.model_json_schema(),
                 },

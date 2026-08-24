@@ -1,4 +1,4 @@
-"""Narrative and machine-readable CLI for the safe BOLACheck pipeline."""
+"""Narrative and machine-readable CLI for the safe OpenBOLA pipeline."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from bola_checker.pipeline import IdentityInput, PipelineError, PipelineResult, run_pipeline
+from openbola.pipeline import IdentityInput, PipelineError, PipelineResult, run_pipeline
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 console = Console()
@@ -106,7 +106,7 @@ def scan(
 
 @app.callback()
 def main() -> None:
-    """BOLACheck: authorization-first BOLA/IDOR testing."""
+    """OpenBOLA: authorization-first BOLA/IDOR testing."""
 
 
 if __name__ == "__main__":  # pragma: no cover

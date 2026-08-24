@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from bola_checker.models import (
+from openbola.models import (
     AuditEventType,
     CredentialKind,
     CredentialRef,
@@ -21,7 +21,7 @@ from bola_checker.models import (
     ProbeTarget,
     Verdict,
 )
-from bola_checker.state import (
+from openbola.state import (
     OwnershipConflictError,
     StateStore,
     canonical_finding_text,

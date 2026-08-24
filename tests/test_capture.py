@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from bola_checker.capture import CaptureConfig, CaptureError, parse_har_records
-from bola_checker.scope import ScopeGuard
+from openbola.capture import CaptureConfig, CaptureError, parse_har_records
+from openbola.scope import ScopeGuard
 
 
 def make_config(tmp_path: Path, **changes: object) -> CaptureConfig:
@@ -150,7 +150,7 @@ def test_import_sanitizes_and_bounds(tmp_path: Path) -> None:
 
 
 def test_default_collector_captures_sanitized_body_and_response_metadata() -> None:
-    from bola_checker import capture
+    from openbola import capture
 
     callbacks: dict[str, Any] = {}
 
@@ -207,7 +207,7 @@ def test_default_collector_captures_sanitized_body_and_response_metadata() -> No
 def test_default_collector_assigns_safe_post_data_mime_fallbacks(
     body: str | bytes, expected_mime_type: str
 ) -> None:
-    from bola_checker import capture
+    from openbola import capture
 
     callbacks: dict[str, Any] = {}
     context = SimpleNamespace(on=lambda event, callback: callbacks.__setitem__(event, callback))
@@ -231,7 +231,7 @@ def test_default_collector_assigns_safe_post_data_mime_fallbacks(
 def test_default_collector_bounds_entries_during_collection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from bola_checker import capture
+    from openbola import capture
 
     callbacks: dict[str, Any] = {}
     context = SimpleNamespace(on=lambda event, callback: callbacks.__setitem__(event, callback))
@@ -260,7 +260,7 @@ def test_default_collector_bounds_entries_during_collection(
 def test_capture_cleanup_and_safe_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
 ) -> None:
-    from bola_checker import capture
+    from openbola import capture
 
     closed: list[str] = []
 
@@ -314,7 +314,7 @@ def test_capture_cleanup_and_safe_output(
         )
         document = json.loads(output.read_text())
         assert document["log"]["version"] == "1.2"
-        assert document["log"]["creator"]["name"] == "BOLACheck"
+        assert document["log"]["creator"]["name"] == "OpenBOLA"
         assert document["log"]["entries"] == []
     else:
         with pytest.raises((RuntimeError, asyncio.CancelledError)):
@@ -326,7 +326,7 @@ def test_capture_cleanup_and_safe_output(
 def test_capture_writes_a_complete_har_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from bola_checker import capture
+    from openbola import capture
 
     class Context:
         async def route(self, pattern: str, handler: object) -> None:
@@ -520,7 +520,7 @@ def test_capture_writes_a_complete_har_entry(
 
 @pytest.mark.parametrize("case", ["depth", "nodes", "bytes"])
 def test_json_structural_limits_fail_closed(case: str) -> None:
-    from bola_checker import capture
+    from openbola import capture
 
     if case == "depth":
         value: object = "value"
@@ -538,7 +538,7 @@ def test_json_structural_limits_fail_closed(case: str) -> None:
 def test_writer_rejects_output_over_configured_size_before_creating_file(
     tmp_path: Path,
 ) -> None:
-    from bola_checker import capture
+    from openbola import capture
 
     with pytest.raises(CaptureError, match="exceeds the configured size limit"):
         capture._write_sanitized_har(tmp_path, Path("oversized.har"), [], max_bytes=10)
@@ -581,7 +581,7 @@ def test_capture_uses_real_route_handler_for_denial_cidr_and_direct_ip(
     allowed_cidrs: list[str],
     should_continue: bool,
 ) -> None:
-    from bola_checker import capture
+    from openbola import capture
 
     actions: list[tuple[str, str | None]] = []
 
@@ -654,7 +654,7 @@ def test_capture_uses_real_route_handler_for_denial_cidr_and_direct_ip(
 
 
 def test_writer_rejects_a_symlink_parent(tmp_path: Path) -> None:
-    from bola_checker import capture
+    from openbola import capture
 
     root = tmp_path / "root"
     outside = tmp_path / "outside"
@@ -671,7 +671,7 @@ def test_writer_rejects_a_symlink_parent(tmp_path: Path) -> None:
 def test_writer_remains_anchored_when_parent_is_swapped_for_a_symlink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from bola_checker import capture
+    from openbola import capture
 
     root = tmp_path / "root"
     nested = root / "nested"
@@ -707,7 +707,7 @@ def test_writer_remains_anchored_when_parent_is_swapped_for_a_symlink(
 def test_writer_failure_cleans_temp_and_preserves_existing_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from bola_checker import capture
+    from openbola import capture
 
     root = tmp_path / "root"
     nested = root / "nested"
@@ -727,7 +727,7 @@ def test_writer_failure_cleans_temp_and_preserves_existing_output(
 
 
 def test_playwright_import_is_lazy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from bola_checker import capture
+    from openbola import capture
 
     monkeypatch.setattr(
         capture.importlib, "import_module", lambda _: (_ for _ in ()).throw(ImportError())

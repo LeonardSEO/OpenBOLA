@@ -1,4 +1,4 @@
-"""Deterministic, credential-safe reports for BOLACheck runs.
+"""Deterministic, credential-safe reports for OpenBOLA runs.
 
 Reports deliberately consume the typed phase contracts rather than a live
 ``StateStore``.  This keeps reporting read-only, makes the complete set of
@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
 
-from bola_checker.models import Finding, ProbeResult, Verdict
-from bola_checker.state import ErrorCode
+from openbola.models import Finding, ProbeResult, Verdict
+from openbola.state import ErrorCode
 
 _SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
 _FAILURE_SEVERITIES = frozenset({"critical", "high"})
@@ -325,7 +325,7 @@ def generate_junit_xml(bundle: ReportBundle) -> str:
     suite = ET.Element(
         "testsuite",
         {
-            "name": "bolacheck.bola_idor",
+            "name": "openbola.bola_idor",
             "tests": str(summary.executed),
             "failures": str(failures),
             "errors": "0",
@@ -478,8 +478,8 @@ def generate_sarif_report(bundle: ReportBundle) -> str:
             {
                 "tool": {
                     "driver": {
-                        "name": "BOLACheck",
-                        "informationUri": "https://github.com/LeonardSEO/bolacheck",
+                        "name": "OpenBOLA",
+                        "informationUri": "https://github.com/LeonardSEO/openbola",
                         "rules": rules,
                     }
                 },
@@ -551,7 +551,7 @@ def _report_document(bundle: ReportBundle) -> dict[str, Any]:
     return {
         "authorization": {"reference_fingerprint": bundle.authorization_reference_fingerprint},
         "findings": [_finding_document(item) for item in _ordered_findings(bundle.findings)],
-        "format": "bolacheck-report-v1",
+        "format": "openbola-report-v1",
         "limitations": [_safe_display_text(item) for item in bundle.limitations],
         "outcomes": [_outcome_document(item) for item in _ordered_outcomes(bundle.outcomes)],
         "scope": {"target_label": _safe_display_text(bundle.scope_target_label)},
@@ -743,7 +743,7 @@ def _sarif_level(severity: str) -> str:
 def _safe_sarif_uri(endpoint: str) -> str:
     """Use a synthetic safe authority so reports never publish a target URL."""
 
-    return "api://bolacheck.invalid" + quote(_safe_endpoint_template(endpoint), safe="/-._~")
+    return "api://openbola.invalid" + quote(_safe_endpoint_template(endpoint), safe="/-._~")
 
 
 def _canonical_json(document: Any) -> str:

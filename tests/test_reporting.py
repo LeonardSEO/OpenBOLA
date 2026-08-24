@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-import bola_checker.reporting as reporting
-from bola_checker.models import (
+import openbola.reporting as reporting
+from openbola.models import (
     CredentialKind,
     CredentialRef,
     Finding,
@@ -16,7 +16,7 @@ from bola_checker.models import (
     ProbeTarget,
     Verdict,
 )
-from bola_checker.reporting import (
+from openbola.reporting import (
     ReportBundle,
     RunSummary,
     generate_json_report,
@@ -26,7 +26,7 @@ from bola_checker.reporting import (
     serialize_evidence,
     write_reports,
 )
-from bola_checker.state import StateStore, canonical_finding_text, object_ref_fingerprint
+from openbola.state import StateStore, canonical_finding_text, object_ref_fingerprint
 
 
 def _credential(identity: str) -> CredentialRef:
@@ -117,7 +117,7 @@ def test_all_formats_are_parseable_deterministic_and_share_safe_summary() -> Non
     assert report["authorization"]["reference_fingerprint"].startswith("sha256:")
     assert "ENG-1234-approved-scope" not in generate_json_report(bundle)
     assert junit.attrib == {
-        "name": "bolacheck.bola_idor",
+        "name": "openbola.bola_idor",
         "tests": "4",
         "failures": "1",
         "errors": "0",
@@ -130,7 +130,7 @@ def test_all_formats_are_parseable_deterministic_and_share_safe_summary() -> Non
     assert sarif["version"] == "2.1.0"
     assert sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"][
         "artifactLocation"
-    ]["uri"] == "api://bolacheck.invalid/documents/%7Bid%7D"
+    ]["uri"] == "api://openbola.invalid/documents/%7Bid%7D"
     assert generate_json_report(bundle) == generate_json_report(bundle)
     assert generate_junit_xml(bundle) == generate_junit_xml(bundle)
     assert generate_markdown_report(bundle) == generate_markdown_report(bundle)

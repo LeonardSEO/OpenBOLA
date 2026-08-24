@@ -6,8 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from bola_checker.credentials import CredentialResolutionError, CredentialVault, _SecretValue
-from bola_checker.models import CredentialKind, CredentialRef
+from openbola.credentials import CredentialResolutionError, CredentialVault, _SecretValue
+from openbola.models import CredentialKind, CredentialRef
 
 
 def test_stores_and_resolves_typed_credentials_without_representing_secret() -> None:

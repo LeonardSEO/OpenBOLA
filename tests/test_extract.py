@@ -6,9 +6,9 @@ from dataclasses import asdict
 
 import pytest
 
-from bola_checker.credentials import CredentialVault
-from bola_checker.extract import decode_jwt_payload, extract_requests
-from bola_checker.models import CredentialKind, RequestRecord
+from openbola.credentials import CredentialVault
+from openbola.extract import decode_jwt_payload, extract_requests
+from openbola.models import CredentialKind, RequestRecord
 
 
 def _jwt(payload: dict[str, str]) -> str:

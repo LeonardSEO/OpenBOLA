@@ -10,9 +10,9 @@ import httpx
 import pytest
 import yaml
 
-import bola_checker.mcp_server as mcp_module
-from bola_checker.mcp_server import MCPService, MCPServiceError, create_mcp_server
-from bola_checker.models import (
+import openbola.mcp_server as mcp_module
+from openbola.mcp_server import MCPService, MCPServiceError, create_mcp_server
+from openbola.models import (
     CredentialKind,
     OwnershipConfidence,
     OwnershipEvidence,
@@ -20,7 +20,7 @@ from bola_checker.models import (
     ProbeTarget,
     Verdict,
 )
-from bola_checker.state import object_ref_fingerprint
+from openbola.state import object_ref_fingerprint
 
 
 def _write_scope(
@@ -262,7 +262,7 @@ def test_state_sqlite_error_is_bounded_and_not_ready(
     def fail_state(_path: object) -> None:
         raise sqlite3.OperationalError("/private/secret/state.db is locked")
 
-    monkeypatch.setattr("bola_checker.mcp_server.StateStore", fail_state)
+    monkeypatch.setattr("openbola.mcp_server.StateStore", fail_state)
     result = service.init_state(tmp_path / "state.db")
 
     assert result == {
@@ -523,4 +523,4 @@ def test_create_server_imports_fastmcp_lazily(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setitem(__import__("sys").modules, "fastmcp", SimpleNamespace(FastMCP=FakeServer))
     server = create_mcp_server()
-    assert server.name == "bolacheck"
+    assert server.name == "openbola"

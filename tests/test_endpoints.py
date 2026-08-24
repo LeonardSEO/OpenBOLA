@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from bola_checker.endpoints import (
+from openbola.endpoints import (
     CandidateLocation,
     build_test_targets,
     correlate_ownership,
@@ -13,17 +13,17 @@ from bola_checker.endpoints import (
     extract_object_ids,
     templatize,
 )
-from bola_checker.models import (
+from openbola.models import (
     OwnershipConfidence,
     OwnershipEvidence,
 )
-from bola_checker.models import (
+from openbola.models import (
     OwnershipConflictError as ModelOwnershipConflictError,
 )
-from bola_checker.state import (
+from openbola.state import (
     OwnershipConflictError as StateOwnershipConflictError,
 )
-from bola_checker.state import (
+from openbola.state import (
     StateStore,
     object_ref_fingerprint,
 )

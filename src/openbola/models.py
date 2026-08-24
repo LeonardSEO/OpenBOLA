@@ -1,4 +1,4 @@
-"""Shared, dependency-light contracts between BOLACheck phases."""
+"""Shared, dependency-light contracts between OpenBOLA phases."""
 
 from __future__ import annotations
 

@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 import yaml
 
-from bola_checker.scope import (
+from openbola.scope import (
     ScopeConfig,
     ScopeDecision,
     ScopeError,

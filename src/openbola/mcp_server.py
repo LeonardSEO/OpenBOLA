@@ -1,4 +1,4 @@
-"""Local, authorization-first MCP interface for BOLACheck.
+"""Local, authorization-first MCP interface for OpenBOLA.
 
 The MCP transport is deliberately a very small adapter around :class:`MCPService`.
 All useful behaviour lives in the service so it can be tested without FastMCP,
@@ -30,17 +30,17 @@ from urllib.parse import urlsplit
 
 from pydantic import Field
 
-from bola_checker.capture import CaptureError, parse_har_records
-from bola_checker.credentials import CredentialVault
-from bola_checker.endpoints import (
+from openbola.capture import CaptureError, parse_har_records
+from openbola.credentials import CredentialVault
+from openbola.endpoints import (
     build_test_targets,
     correlate_ownership,
     discover_endpoint_candidates,
     extract_object_ids,
     templatize,
 )
-from bola_checker.executor import ProbeExecutor
-from bola_checker.models import (
+from openbola.executor import ProbeExecutor
+from openbola.models import (
     CredentialKind,
     CredentialRef,
     ProbeMode,
@@ -48,9 +48,9 @@ from bola_checker.models import (
     ProbeTarget,
     RequestRecord,
 )
-from bola_checker.reporting import ReportBundle, write_reports
-from bola_checker.scope import ScopeError, ScopeGuard
-from bola_checker.state import PendingCombination, StateStore, object_ref_fingerprint
+from openbola.reporting import ReportBundle, write_reports
+from openbola.scope import ScopeError, ScopeGuard
+from openbola.state import PendingCombination, StateStore, object_ref_fingerprint
 
 MAX_PATH_LENGTH = 4096
 MAX_IDENTITY_LENGTH = 128
@@ -832,13 +832,13 @@ def create_mcp_server(
     try:
         fastmcp_module = importlib.import_module("fastmcp")
     except ImportError as error:  # pragma: no cover - optional dependency
-        raise MCPServiceError("FastMCP is unavailable; install bolacheck[mcp].") from error
+        raise MCPServiceError("FastMCP is unavailable; install openbola[mcp].") from error
 
     active = service or MCPService(executor=executor)
     if service is not None and executor is not None:
         active.executor = executor
     fast_mcp: Any = fastmcp_module.FastMCP
-    server: Any = fast_mcp("bolacheck")
+    server: Any = fast_mcp("openbola")
 
     @server.tool  # type: ignore[untyped-decorator]
     def load_scope(scope_path: MCPPath) -> dict[str, Any]:

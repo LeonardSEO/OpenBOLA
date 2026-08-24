@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from bola_checker.models import RequestRecord
-from bola_checker.scope import ScopeDecision, ScopeError, ScopeGuard
+from openbola.models import RequestRecord
+from openbola.scope import ScopeDecision, ScopeError, ScopeGuard
 
 DEFAULT_MAX_HAR_BYTES = 25 * 1024 * 1024
 _REDACTED = "[REDACTED]"
@@ -126,7 +126,7 @@ async def capture_har(
         async_api = importlib.import_module("playwright.async_api")
         async_playwright = async_api.async_playwright
     except (ImportError, AttributeError) as exc:
-        raise CaptureError("Playwright unavailable. Install bolacheck[capture].") from exc
+        raise CaptureError("Playwright unavailable. Install openbola[capture].") from exc
 
     if not isinstance(scope_guard, ScopeGuard):
         raise CaptureError("scope_guard must be a ScopeGuard")
@@ -603,7 +603,7 @@ def _har_document(entries: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "log": {
             "version": "1.2",
-            "creator": {"name": "BOLACheck", "version": "0.1.0"},
+            "creator": {"name": "OpenBOLA", "version": "0.1.0"},
             "entries": complete_entries,
         }
     }

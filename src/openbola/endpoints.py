@@ -18,7 +18,7 @@ from enum import StrEnum
 from typing import Any, Protocol
 from urllib.parse import parse_qsl, unquote, urlsplit
 
-from bola_checker.models import (
+from openbola.models import (
     OwnershipConfidence,
     OwnershipConflictError,
     OwnershipEvidence,

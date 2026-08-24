@@ -15,7 +15,7 @@ import secrets
 from threading import RLock
 from typing import Final, NoReturn, SupportsIndex
 
-from bola_checker.models import CredentialKind, CredentialRef
+from openbola.models import CredentialKind, CredentialRef
 
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _PROCESS_FINGERPRINT_KEY: Final = secrets.token_bytes(32)

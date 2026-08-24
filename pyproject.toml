@@ -3,7 +3,7 @@ requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
 
 [project]
-name = "bolacheck"
+name = "openbola"
 version = "0.1.0"
 description = "Authorization-first automated BOLA/IDOR testing for APIs"
 readme = "README.md"
@@ -49,10 +49,10 @@ dev = [
 ]
 
 [project.scripts]
-bolacheck = "bola_checker.cli:app"
+openbola = "openbola.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/bola_checker"]
+packages = ["src/openbola"]
 
 [tool.hatch.build.targets.sdist]
 exclude = ["bola-tool-plan.md"]
@@ -72,4 +72,4 @@ ignore = ["S101"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["bola_checker"]
+packages = ["openbola"]

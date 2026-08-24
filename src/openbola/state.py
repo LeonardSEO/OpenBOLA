@@ -1,4 +1,4 @@
-"""Persistent, credential-safe SQLite audit state for BOLACheck.
+"""Persistent, credential-safe SQLite audit state for OpenBOLA.
 
 This module deliberately stores references to credentials, never credential
 values.  Probe attempts and audit events are append-only so that a later run
@@ -30,7 +30,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, overload
 
-from bola_checker.models import (
+from openbola.models import (
     AuditEventType,
     CredentialRef,
     Finding,

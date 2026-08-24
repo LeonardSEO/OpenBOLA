@@ -1,4 +1,4 @@
-"""A deterministic, localhost-only target for BOLACheck development tests."""
+"""A deterministic, localhost-only target for OpenBOLA development tests."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ DEMO_DOCUMENT = {
 
 
 class _Handler(BaseHTTPRequestHandler):
-    server_version = "BOLACheckMock/1"
+    server_version = "OpenBOLAMock/1"
     sys_version = ""
     documents: ClassVar[dict[str, dict[str, str]]] = {
         "812": DOCUMENT,
@@ -84,7 +84,7 @@ class MockTarget:
             },
         )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        self.thread = Thread(target=self.server.serve_forever, name="bolacheck-mock", daemon=True)
+        self.thread = Thread(target=self.server.serve_forever, name="openbola-mock", daemon=True)
         self.thread.start()
 
     @property

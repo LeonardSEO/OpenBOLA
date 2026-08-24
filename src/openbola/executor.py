@@ -3,7 +3,7 @@
 The executor is the only phase that is allowed to perform network I/O.  It
 does not use the optional AI planner and it never follows a redirect through
 the HTTP client's implicit redirect machinery.  Every hop is checked by the
-same :class:`~bola_checker.scope.ScopeGuard` that checked the initial target.
+same :class:`~openbola.scope.ScopeGuard` that checked the initial target.
 
 The default operation is a bounded read probe.  Mutation probes are a
 separate, deliberately narrow API: a caller must provide a canary and a
@@ -29,9 +29,9 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
-from bola_checker.credentials import CredentialResolutionError, CredentialVault
-from bola_checker.models import CredentialKind, ProbeMode, ProbeResult, ProbeTarget, Verdict
-from bola_checker.scope import ScopeDecision, ScopeError, ScopeGuard
+from openbola.credentials import CredentialResolutionError, CredentialVault
+from openbola.models import CredentialKind, ProbeMode, ProbeResult, ProbeTarget, Verdict
+from openbola.scope import ScopeDecision, ScopeError, ScopeGuard
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _MUTATION_METHODS = frozenset({"POST", "PUT", "PATCH"})

@@ -16,8 +16,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 
-from bola_checker.credentials import CredentialVault, fingerprint_secret
-from bola_checker.models import CredentialKind, CredentialRef, RequestRecord
+from openbola.credentials import CredentialVault, fingerprint_secret
+from openbola.models import CredentialKind, CredentialRef, RequestRecord
 
 _API_KEY_HEADERS = frozenset(
     {

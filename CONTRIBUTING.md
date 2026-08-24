@@ -1,7 +1,7 @@
-# Contributing to BOLACheck
+# Contributing to OpenBOLA
 
 Thank you for helping make authorization testing safer and more reviewable.
-BOLACheck is an alpha project: small, evidence-backed changes are easier to
+OpenBOLA is an alpha project: small, evidence-backed changes are easier to
 review than broad rewrites.
 
 ## Before you start
