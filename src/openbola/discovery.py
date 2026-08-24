@@ -2,11 +2,12 @@
 
 Spec: docs/superpowers/specs/2026-08-24-openbola-v1-design.md #5.
 
-Adapters consume already-captured ``RequestRecord`` evidence and never send
-a request themselves. Every field this module reports comes from data
-``RequestRecord`` already carries; it never assumes richer fidelity than
-that (see the roadmap's P4 entry for why field *value types* are
-deliberately not part of ``FieldInventory``). Object-ID-shaped JSON keys
+Adapters consume callback-only ``AdapterRecordView`` evidence and never send
+a request themselves. Every persistent field this module reports comes from
+the sanitized ``RequestRecord`` carried by the view; ephemeral bodies are
+inspected only synchronously to derive field names and opaque handles (see the
+roadmap's P4 entry for why field *value types* are deliberately not part of
+``FieldInventory``). Object-ID-shaped JSON keys
 (e.g. Firebase-style ``{"uid_...": {...}}`` maps) are routed to
 ``record_handles`` rather than ``fields`` for the same reason path-embedded
 IDs are: raw IDs never appear in persisted state, reports, or AI context —
