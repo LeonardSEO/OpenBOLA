@@ -235,8 +235,14 @@ def _read_marker(root: Path) -> tuple[_Marker | None, str | None]:
             payload = stream.read(_MAX_MARKER_BYTES + 1)
         if len(payload) > _MAX_MARKER_BYTES:
             return None, "setup_marker_invalid"
-        value = json.loads(payload.decode("utf-8"))
-        if not isinstance(value, dict) or value.get("schema") != _SETUP_SCHEMA:
+        value = json.loads(payload.decode("utf-8"), object_pairs_hook=_marker_pairs)
+        if not isinstance(value, dict) or set(value) != {
+            "schema",
+            "version",
+            "browser",
+            "vault",
+            "self_test",
+        } or value.get("schema") != _SETUP_SCHEMA:
             return None, "setup_marker_invalid"
         browser = value.get("browser")
         vault = value.get("vault")
@@ -259,7 +265,7 @@ def _default_browser_probe(root: Path | None) -> _ProbeResult:
     try:
         if importlib.util.find_spec("playwright") is None:
             return _result("warning", "browser_dependency_missing")
-    except (ImportError, ModuleNotFoundError, ValueError):
+    except Exception:
         return _result("warning", "browser_dependency_missing")
     if root is None:
         return _result("warning", "setup_marker_missing")
@@ -334,6 +340,17 @@ def _normalise_recovery(value: object) -> RecoveryState:
     return "blocked"
 
 
+def _marker_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject duplicate marker keys rather than allowing last-value wins."""
+
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate setup marker key")
+        result[key] = value
+    return result
+
+
 def _recovery_diagnostic(gate: RecoveryProbe | Probe | None) -> tuple[Diagnostic, RecoveryState]:
     if gate is None:
         return Diagnostic("recovery", "blocked", "recovery_unavailable"), "blocked"
@@ -374,7 +391,9 @@ def run_doctor(
     del json_output
     active_platform = sys.platform if platform is None else platform
     diagnostics: list[Diagnostic] = []
-    if active_platform == "win32" and not os.environ.get("LOCALAPPDATA"):
+    if not isinstance(active_platform, str):
+        diagnostics.append(Diagnostic("platform", "blocked", "platform_unsupported"))
+    elif active_platform == "win32" and not os.environ.get("LOCALAPPDATA"):
         diagnostics.append(Diagnostic("platform", "blocked", "localappdata_missing"))
     elif active_platform in _SUPPORTED_PLATFORMS:
         diagnostics.append(Diagnostic("platform", "ok", "platform_supported"))
@@ -388,7 +407,10 @@ def run_doctor(
         except Exception:
             selected_root = None
     if selected_root is not None:
-        selected_root = Path(selected_root)
+        try:
+            selected_root = Path(selected_root)
+        except (TypeError, ValueError, OSError):
+            selected_root = None
     root_result = (
         _private_directory(selected_root)
         if selected_root is not None
@@ -429,9 +451,13 @@ def run_doctor(
     )
     diagnostics.append(Diagnostic("vault", vault_result.status, vault_result.code))
 
-    selected_db = Path(db_path) if db_path is not None else (
-        selected_root / "state.db" if selected_root is not None else None
-    )
+    if db_path is not None:
+        try:
+            selected_db = Path(db_path)
+        except (TypeError, ValueError, OSError):
+            selected_db = None
+    else:
+        selected_db = selected_root / "state.db" if selected_root is not None else None
     state_result = (
         _invoke_probe(
             state_probe,
