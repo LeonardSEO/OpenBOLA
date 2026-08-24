@@ -654,7 +654,12 @@ class _FullFidelityEventCollector:
 
 
 def _safe_full_capture_error(error: BaseException) -> CaptureError:
-    if isinstance(error, CaptureError) and str(error) in _SAFE_FULL_CAPTURE_ERRORS:
+    if (
+        type(error) is CaptureError
+        and len(error.args) == 1
+        and isinstance(error.args[0], str)
+        and error.args[0] in _SAFE_FULL_CAPTURE_ERRORS
+    ):
         return error
     return CaptureError("full capture event stream is incomplete")
 
