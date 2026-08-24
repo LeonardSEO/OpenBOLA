@@ -516,7 +516,11 @@ class _FullFidelityEventCollector:
         request = getattr(response, "request", None)
         request_id = id(request)
         with self._lock:
-            if request_id not in self._requests or request_id in self._responses:
+            if (
+                request_id not in self._requests
+                or request_id in self._responses
+                or request_id in self._response_tasks
+            ):
                 self._stream_incomplete = True
                 return
             body_method = getattr(response, "body", None)
