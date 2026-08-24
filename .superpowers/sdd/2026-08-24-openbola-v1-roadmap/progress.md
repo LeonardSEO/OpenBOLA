@@ -112,3 +112,5 @@ boundaries. External P11 publication actions remain separately approval-gated.
   draining, safe limits, and sanitized HAR publication). Implementer reported
   55 capture tests passing with Ruff and strict mypy green; independent review
   is pending.
+- Follow-up `f6b1c44` closes the duplicate-response race while an earlier body
+  task is still draining; it is included in the pending independent review.
