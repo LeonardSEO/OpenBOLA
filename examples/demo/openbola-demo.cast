@@ -1,0 +1,12 @@
+{"version":2,"width":100,"height":28,"command":"P8/P9 local mock-target fixture (offline transcript)","title":"OpenBOLA deterministic local proof"}
+[0.2,"o","$ local mock-target fixture\r\n"]
+[0.2,"o","[setup] loopback target: http://127.0.0.1:${MOCK_PORT} (local only)\r\n"]
+[0.2,"o","[identities] alice + bob; credentials held in the local vault\r\n"]
+[0.2,"o","[discovery] read-only records: ${alice.record_id}, ${bob.record_id}\r\n"]
+[0.2,"o","[authorization] confirmed local scope; ScopeGuard decision: allow GET\r\n"]
+[0.3,"o","[probe] confirmed local BOLA read: bob can read ${alice.record_id}\r\n"]
+[0.3,"o","[mutation grant] explicit PATCH grant accepted; reversible canary recorded\r\n"]
+[0.3,"o","[restore verification] original value verified; cleanup complete\r\n"]
+[0.3,"o","[report output] report.html report.csv report.json report.md junit.xml report.sarif\r\n"]
+[0.3,"o","[summary] sanitized finding: BOLA read; opaque handles only\r\n"]
+[0.3,"o","[limitation] zero findings is not proof of safety.\r\n"]
