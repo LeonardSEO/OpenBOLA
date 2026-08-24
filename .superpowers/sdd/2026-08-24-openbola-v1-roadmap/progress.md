@@ -170,3 +170,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   protocol acceptance and capture→AdapterRecordView→Hasura proof with
   sanitized HAR/raw-serialization assertions. Implementer reports focused 22
   and full pytest 394 passed; independent review is pending.
+- P4d Task 4 independently approved: returning-field/malformed/redacted
+  acceptance, protocol checks, and deterministic capture→Hasura proof all pass;
+  no network path or raw serialization exists. **P4d is complete** across
+  Tasks 1–4. P5 BYOK AI planning is the next roadmap gate.
