@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Final, NoReturn, cast
 from urllib.parse import quote
 
-from openbola.reporting import _ARTIFACT_FILENAMES, _CSV_HEADER
+from openbola.reporting import _ARTIFACT_FILENAMES, _CSV_HEADER, _SECRET_TEXT_RE
 
 REPORT_SCHEMA: Final = "openbola-report-v1"
 MANIFEST_SCHEMA: Final = "openbola-report-run-v1"
@@ -236,7 +236,11 @@ def _shape(value: object, *, depth: int = 0, nodes: list[int] | None = None) -> 
         for child in value:
             _shape(child, depth=depth + 1, nodes=nodes)
     elif isinstance(value, str):
-        if len(value) > 16_384 or _SENTINEL_RE.search(value):
+        if (
+            len(value) > 16_384
+            or _SENTINEL_RE.search(value)
+            or _SECRET_TEXT_RE.search(value)
+        ):
             _fail("report_unsafe")
 
 
@@ -523,7 +527,12 @@ def _validate_evidence_nested(
 
 
 def _validate_string(value: object, *, nonempty: bool = True) -> None:
-    if not isinstance(value, str) or len(value) > 512 or (nonempty and not value.strip()):
+    if (
+        not isinstance(value, str)
+        or len(value) > 512
+        or (nonempty and not value.strip())
+        or _SECRET_TEXT_RE.search(value) is not None
+    ):
         _fail("report_schema_mismatch")
 
 

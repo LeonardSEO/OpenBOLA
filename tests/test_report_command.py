@@ -248,3 +248,15 @@ def test_stale_manifest_is_rejected_when_artifacts_are_newer(tmp_path: Path) -> 
     with pytest.raises(ReportError) as stale:
         load_published_report(directory)
     assert stale.value.code == "manifest_stale"
+
+
+def test_report_display_text_rejects_secret_like_scope_label(tmp_path: Path) -> None:
+    root = _private(tmp_path / "data")
+    directory = _published(root)
+    payload = json.loads((directory / "report.json").read_text(encoding="utf-8"))
+    payload["scope"]["target_label"] = "token: TOPSECRET"
+    (directory / "report.json").write_text(json.dumps(payload), encoding="utf-8")
+    (directory / "report.json").chmod(0o600)
+    with pytest.raises(ReportError) as secret:
+        load_published_report(directory)
+    assert secret.value.code == "report_unsafe"

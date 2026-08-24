@@ -12,8 +12,10 @@ from typer.testing import CliRunner
 import openbola.cli as cli_module
 from openbola import __version__
 from openbola.cli import app
+from openbola.doctor import Diagnostic, DiagnosticReport
 from openbola.mcp_server import MCPServiceError
 from openbola.mock_target import DEMO_OBJECT_ID, MockTarget
+from openbola.setup import SetupResult
 from openbola.updates import UpdateResult
 
 
@@ -286,7 +288,9 @@ def test_cli_json_rejects_deep_records_without_traceback(tmp_path: Path) -> None
     assert json.loads(result.stdout) == {"ok": False, "error": "scan_denied"}
 
 
-def test_admin_commands_and_version_are_registered_without_secrets() -> None:
+def test_admin_commands_and_version_are_registered_without_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     runner = CliRunner()
     version = runner.invoke(app, ["--version"])
     assert version.exit_code == 0
@@ -297,10 +301,100 @@ def test_admin_commands_and_version_are_registered_without_secrets() -> None:
     for command in ("setup", "doctor", "report", "update", "mcp"):
         assert command in help_result.stdout
 
+    monkeypatch.setattr(
+        cli_module,
+        "run_doctor",
+        lambda **kwargs: DiagnosticReport(
+            (Diagnostic("platform", "ok", "platform_supported"),), "clear"
+        ),
+    )
     result = runner.invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "diagnostics": [{"code": "platform_supported", "name": "platform", "status": "ok"}],
+        "ok": True,
+        "recovery_state": "clear",
+    }
+    assert "SECRET" not in result.stdout
+
+
+def test_setup_json_is_bounded_and_forwards_force_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[bool] = []
+
+    def fake_setup(*, force_browser: bool) -> SetupResult:
+        calls.append(force_browser)
+        return SetupResult("already_ready", "ready", "passed")
+
+    monkeypatch.setattr(cli_module, "run_setup", fake_setup)
+    result = CliRunner().invoke(app, ["setup", "--force-browser", "--json"])
+    assert result.exit_code == 0
+    assert calls == [True]
+    assert json.loads(result.stdout) == {
+        "browser": "already_ready",
+        "ok": True,
+        "self_test": "passed",
+        "vault": "ready",
+    }
+
+
+def test_setup_failure_hides_untrusted_reason_in_both_output_modes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "SETUP_LOCAL_SECRET_SENTINEL"
+    monkeypatch.setattr(
+        cli_module,
+        "run_setup",
+        lambda *, force_browser: SetupResult(
+            "unavailable", "unavailable", "failed", sentinel
+        ),
+    )
+    json_result = CliRunner().invoke(app, ["setup", "--json"])
+    rich_result = CliRunner().invoke(app, ["setup"])
+    assert json_result.exit_code == 2
+    assert rich_result.exit_code == 2
+    assert sentinel not in json_result.stdout
+    assert sentinel not in rich_result.stdout
+    assert json.loads(json_result.stdout) == {
+        "browser": "unavailable",
+        "ok": False,
+        "self_test": "failed",
+        "vault": "unavailable",
+    }
+
+
+def test_doctor_blocked_report_preserves_diagnostics_and_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = DiagnosticReport(
+        (Diagnostic("recovery", "blocked", "recovery_blocked"),), "blocked"
+    )
+    monkeypatch.setattr(cli_module, "run_doctor", lambda **kwargs: report)
+    result = CliRunner().invoke(app, ["doctor", "--db", "state.db", "--json"])
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == {
+        "diagnostics": [
+            {"code": "recovery_blocked", "name": "recovery", "status": "blocked"}
+        ],
+        "ok": False,
+        "recovery_state": "blocked",
+    }
+
+
+def test_doctor_service_exception_is_generic_without_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "DOCTOR_LOCAL_SECRET_SENTINEL"
+
+    def fail(**kwargs: object) -> DiagnosticReport:
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(cli_module, "run_doctor", fail)
+    result = CliRunner().invoke(app, ["doctor", "--json"])
     assert result.exit_code == 2
     assert json.loads(result.stdout) == {"ok": False, "error": "diagnostics_blocked"}
-    assert "SECRET" not in result.stdout
+    assert sentinel not in result.stdout
 
 
 def test_mcp_command_starts_renamed_read_only_server(
