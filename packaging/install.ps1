@@ -49,7 +49,7 @@ try {
         if ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint) { Stop-Install 'destination executable is a reparse point' }
         if (-not $Yes) {
             $answer = Read-Host "Replace $destination? [y/N]"
-            if ($answer -notmatch '^(?i:y|yes)$') { Stop-Install 'replacement not confirmed' }
+            if ($answer -notmatch '^(?i:y|yes)$') { Stop-Install 'replacement declined' }
         }
     }
     $temporary = Join-Path $BinDir ('.openbola-' + [Guid]::NewGuid().ToString('N') + '.tmp')
