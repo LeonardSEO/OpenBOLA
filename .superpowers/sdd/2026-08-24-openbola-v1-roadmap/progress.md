@@ -222,6 +222,23 @@ boundaries. External P11 publication actions remain separately approval-gated.
   registry close proof all pass. **P5 is complete** across Tasks 1–5; P6
   mutation/recovery planning is next.
 
+## Current integration checkpoint
+
+- P3b and P4d are complete on `main`. The typed provider registry is committed
+  as `26ccf1e`, with ordered generic, Supabase/PostgREST, Firebase RTDB, and
+  Hasura adapters plus four focused registry tests. The ephemeral
+  `AdapterRecordView` serialization boundary is explicit for `__getstate__`,
+  `__reduce__`, and `__reduce_ex__` in `74d8039`.
+- Dependency-free P8 session groundwork is present in `c434a3f`, `6f7ae13`,
+  and `b3e8f5a`: typed lifecycle/progress/cancellation, recovery projection,
+  canonical target binding, and confirmed-scope host enforcement. The Textual
+  TUI, review grant/confirmation flow, and Pilot acceptance tests remain open.
+- P9 setup intentionally fails closed for the default Playwright CDN download
+  (`scope_required`, `f894df3`) because that subprocess cannot expose each
+  redirect to `ScopeGuard`; a reviewed OpenBOLA-controlled provisioning
+  adapter is still required for the browser-download acceptance. Distribution
+  update traffic now requires an explicit validated `--scope` (`f6e0946`).
+
 ## P6 execution status
 
 - Executable P6 plan committed as `e70b8fe`: all-record immutable preflight,
@@ -281,7 +298,9 @@ boundaries. External P11 publication actions remain separately approval-gated.
 - P9 Task 2 setup service is complete across `5758c62`, `00fa464`, `557c05a`,
   `06ac3d6`, and `2f0be3f`: vault/browser preparation is bounded, atomic, and
   literal-success-only. Independent review approved 16 setup tests plus the
-  related capture suite, with Ruff/mypy green.
+  related capture suite, with Ruff/mypy green. The default Playwright browser
+  download is deliberately fail-closed pending a ScopeGuard-aware provisioning
+  adapter (`f894df3`); local readiness and pre-provisioned browser checks remain.
 - P9 Task 3 doctor service is complete across `9803586`, `b2e8ee0`,
   `37865dd`, `58cc976`, `247fbfa`, `d8c3d64`, and `650dfa3`, with reports in
   `933be39`, `d4b1570`, and `a2b7513`. Independent review approved 15 doctor
@@ -300,7 +319,9 @@ boundaries. External P11 publication actions remain separately approval-gated.
   and `3cca738`: exact scoped release traffic, strict GitHub metadata, pinned
   transport fail-closed behavior, verified P10 archive extraction, adjacent
   executable manifests, and bounded malformed-reader failures. Independent
-  review approved 29 update tests with Ruff and strict mypy.
+  review approved 29 update tests with Ruff and strict mypy. The CLI now
+  requires an explicit validated distribution `--scope` (`f6e0946`); absent or
+  malformed scope is rejected before the updater service is called.
 - P9 CLI setup/doctor integration is included in `c478d58` with focused
   coverage in `e9a6af9`; the combined P9 CLI/setup/doctor/report/update/MCP
   subset is green.

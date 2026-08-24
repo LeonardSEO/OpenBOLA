@@ -153,10 +153,14 @@ plans before it.
      behind process-local session handles. A callback-only ephemeral adapter
      view may resolve raw `RequestRecord` values during one synchronous
      provider call, but may not return, persist, report, send to AI, or expose
-     them through MCP. *Status: planned (2026-08-24).*
+     them through MCP. *Status: complete, merged to main (2026-08-24).* The
+     `AdapterRecordView` boundary now explicitly blocks `__getstate__`,
+     `__reduce__`, and `__reduce_ex__` serialization hooks.
    - **P4d** — Hasura adapter, written just-in-time after P3b and now that
      P4a/P4b/P4c's contracts and the origin/tenant-isolation and
-     sensitive-field/sensitive-parent-guard precedents have landed.
+     sensitive-field/sensitive-parent-guard precedents have landed. *Status:
+     complete, merged to main (2026-08-24).* A typed provider registry now
+     assembles the four built-in adapters without adding a network path.
 
    Ruling: every `RequestRecord` this codebase produces today (from both
    `capture.py`'s live collector and its HAR parser) already has its body
