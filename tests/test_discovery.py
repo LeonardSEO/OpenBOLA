@@ -7,7 +7,8 @@ from openbola.discovery import (
     ProviderDetection,
     ResourceInventory,
 )
-from openbola.handles import ValueHandle
+from openbola.handles import InMemorySessionValueRegistry, ValueHandle
+from openbola.models import RequestRecord
 
 
 def test_provider_confidence_has_three_members() -> None:
@@ -67,3 +68,143 @@ def test_provider_adapter_is_a_protocol_with_expected_members() -> None:
     assert adapter.name == "minimal"
     assert adapter.detect(()).provider == "minimal"
     assert adapter.inventory(()) == ()
+
+
+def _record(
+    method: str,
+    url: str,
+    *,
+    body: bytes | None = None,
+    response_body: bytes | None = None,
+    response_status: int | None = 200,
+) -> RequestRecord:
+    return RequestRecord(
+        "alice",
+        method,
+        url,
+        {},
+        body,
+        response_status,
+        {},
+        response_body,
+    )
+
+
+def test_generic_adapter_detect_is_always_unknown_confidence() -> None:
+    from openbola.discovery import GenericAdapter
+
+    adapter = GenericAdapter(InMemorySessionValueRegistry())
+    detection = adapter.detect(())
+    assert detection.provider == "generic"
+    assert detection.confidence == ProviderConfidence.UNKNOWN
+
+
+def test_generic_adapter_groups_records_by_templatized_endpoint() -> None:
+    from openbola.discovery import GenericAdapter
+
+    registry = InMemorySessionValueRegistry()
+    adapter = GenericAdapter(registry)
+    records = [
+        _record("GET", "https://api.example.test/v1/users"),
+        _record("GET", "https://api.example.test/v1/users/42"),
+        _record(
+            "PATCH",
+            "https://api.example.test/v1/users/42",
+            body=b'{"email": "alice@example.test"}',
+            response_body=b'{"id": 42, "email": "alice@example.test", "name": "Alice"}',
+        ),
+        _record(
+            "POST",
+            "https://api.example.test/v1/users",
+            body=b'{"email": "bob@example.test", "name": "Bob"}',
+            response_body=b'{"id": 43}',
+        ),
+    ]
+
+    inventories = adapter.inventory(records)
+    by_template = {item.endpoint_template: item for item in inventories}
+
+    assert set(by_template) == {"/v1/users", "/v1/users/{id}"}
+
+    collection = by_template["/v1/users"]
+    assert collection.provider == "generic"
+    assert collection.provider_confidence == ProviderConfidence.UNKNOWN
+    assert collection.resource_name == "users"
+    assert collection.observed_methods == frozenset({"GET", "POST"})
+    assert {f.name for f in collection.fields} == {"email", "name", "id"}
+    assert collection.record_handles == ()  # no path-embedded ID at this template
+
+    item = by_template["/v1/users/{id}"]
+    assert item.observed_methods == frozenset({"GET", "PATCH"})
+    assert {f.name for f in item.fields} == {"email", "id", "name"}
+    assert len(item.record_handles) == 1
+    assert registry.resolve_value(item.record_handles[0]) == "42"
+
+
+def test_generic_adapter_ignores_non_json_and_malformed_bodies() -> None:
+    from openbola.discovery import GenericAdapter
+
+    adapter = GenericAdapter(InMemorySessionValueRegistry())
+    records = [
+        _record("POST", "https://api.example.test/v1/reports", body=b"not json"),
+        _record(
+            "POST",
+            "https://api.example.test/v1/reports",
+            body=b'"just a json string, not an object"',
+        ),
+        _record("GET", "https://api.example.test/v1/reports", response_body=b"[]"),
+    ]
+
+    inventories = adapter.inventory(records)
+    assert len(inventories) == 1
+    assert inventories[0].fields == ()
+
+
+def test_generic_adapter_extracts_fields_from_list_of_objects_response() -> None:
+    from openbola.discovery import GenericAdapter
+
+    adapter = GenericAdapter(InMemorySessionValueRegistry())
+    records = [
+        _record(
+            "GET",
+            "https://api.example.test/v1/orders",
+            response_body=b'[{"id": 1, "total": 9.5}, {"id": 2, "status": "paid"}]',
+        ),
+    ]
+
+    inventories = adapter.inventory(records)
+    assert len(inventories) == 1
+    assert {f.name for f in inventories[0].fields} == {"id", "total", "status"}
+
+
+def test_generic_adapter_deduplicates_record_handles_per_template() -> None:
+    from openbola.discovery import GenericAdapter
+
+    registry = InMemorySessionValueRegistry()
+    adapter = GenericAdapter(registry)
+    records = [
+        _record("GET", "https://api.example.test/v1/users/42"),
+        _record("PATCH", "https://api.example.test/v1/users/42"),
+        _record("GET", "https://api.example.test/v1/users/43"),
+    ]
+
+    inventories = adapter.inventory(records)
+    assert len(inventories) == 1
+    handles = inventories[0].record_handles
+    resolved = {registry.resolve_value(handle) for handle in handles}
+    assert resolved == {"42", "43"}
+    assert len(handles) == 2  # one handle per unique ID, not per record
+
+
+def test_generic_adapter_resource_name_skips_every_numbered_placeholder() -> None:
+    from openbola.discovery import GenericAdapter
+
+    adapter = GenericAdapter(InMemorySessionValueRegistry())
+    records = [
+        _record("GET", "https://api.example.test/v1/orgs/7/users/42"),
+    ]
+
+    inventories = adapter.inventory(records)
+    assert len(inventories) == 1
+    assert inventories[0].endpoint_template == "/v1/orgs/{id}/users/{id2}"
+    assert inventories[0].resource_name == "users"
