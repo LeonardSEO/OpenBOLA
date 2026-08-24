@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
 _APP_DIR_NAME = "OpenBOLA"
 
@@ -26,7 +26,7 @@ def data_root() -> Path:
         local_app_data = os.environ.get("LOCALAPPDATA")
         if not local_app_data:
             raise RuntimeError("LOCALAPPDATA is not set; cannot resolve the OpenBOLA data root.")
-        return PureWindowsPath(local_app_data) / _APP_DIR_NAME  # type: ignore[return-value]
+        return Path(local_app_data) / _APP_DIR_NAME
 
     raise RuntimeError(
         f"Unsupported platform {sys.platform!r}: OpenBOLA v1 supports macOS and Windows only."

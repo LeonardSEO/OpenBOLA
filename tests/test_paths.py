@@ -16,7 +16,10 @@ def test_macos_data_root(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_windows_data_root(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\testuser\AppData\Local")
-    assert str(data_root()) == r"C:\Users\testuser\AppData\Local\OpenBOLA"
+    from pathlib import PureWindowsPath
+    assert PureWindowsPath(str(data_root())) == PureWindowsPath(
+        r"C:\Users\testuser\AppData\Local\OpenBOLA"
+    )
 
 
 def test_windows_data_root_requires_localappdata(monkeypatch: pytest.MonkeyPatch) -> None:
