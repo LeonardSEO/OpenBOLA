@@ -346,7 +346,9 @@ def report_command(
             return
         console.print(f"[cyan]>[/cyan] sanitized report: {artifact.name}")
         if "target_label" in details:
-            console.print(f"  [dim]->[/dim] target: {details['target_label']}")
+            console.print(
+                f"  [dim]->[/dim] target: {details['target_label']}", markup=False
+            )
         summary = details.get("summary")
         if isinstance(summary, dict):
             for key, value in summary.items():
