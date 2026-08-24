@@ -15,6 +15,7 @@ from openbola.cli import app
 from openbola.doctor import Diagnostic, DiagnosticReport
 from openbola.mcp_server import MCPServiceError
 from openbola.mock_target import DEMO_OBJECT_ID, MockTarget
+from openbola.scope import ScopeGuard
 from openbola.setup import SetupResult
 from openbola.updates import UpdateResult
 
@@ -452,6 +453,65 @@ def test_update_check_maps_bounded_available_result(
         "ok": True,
         "status": "available",
     }
+
+
+def test_update_scope_option_loads_confirmed_guard_for_distribution_check(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seen: list[ScopeGuard] = []
+
+    def fake_check(*, force_check: bool, scope_guard: ScopeGuard) -> UpdateResult:
+        assert force_check is True
+        seen.append(scope_guard)
+        return UpdateResult("available", "0.1.0", "0.1.1")
+
+    monkeypatch.setattr(cli_module, "check_for_update", fake_check)
+    scope_path = _scope(tmp_path / "distribution-scope.yaml")
+    result = CliRunner().invoke(
+        app,
+        [
+            "update",
+            "--check",
+            "--force-check",
+            "--distribution-scope",
+            str(scope_path),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert len(seen) == 1
+    assert seen[0].scope_digest
+    assert json.loads(result.stdout)["status"] == "available"
+
+
+def test_update_scope_option_rejects_invalid_scope_before_service_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    called = False
+
+    def fake_check(*, force_check: bool) -> UpdateResult:
+        nonlocal called
+        called = True
+        return UpdateResult("available", "0.1.0", "0.1.1")
+
+    monkeypatch.setattr(cli_module, "check_for_update", fake_check)
+    result = CliRunner().invoke(
+        app,
+        [
+            "update",
+            "--check",
+            "--scope",
+            str(tmp_path / "missing-scope.yaml"),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == {"ok": False, "error": "update_denied"}
+    assert called is False
 
 
 def test_update_apply_maps_denial_without_secret(

@@ -20,6 +20,7 @@ from openbola.reports import (
     ReportLocator,
     load_published_report,
 )
+from openbola.scope import ScopeGuard
 from openbola.setup import SetupResult, run_setup
 from openbola.updates import UpdateResult, apply_update, check_for_update
 
@@ -364,14 +365,30 @@ def update_command(
     check: Annotated[bool, typer.Option("--check")] = False,
     yes: Annotated[bool, typer.Option("--yes")] = False,
     force_check: Annotated[bool, typer.Option("--force-check")] = False,
+    scope: Annotated[
+        Path | None,
+        typer.Option(
+            "--scope",
+            "--distribution-scope",
+            help="Confirmed scope file authorizing the fixed GitHub distribution endpoints.",
+        ),
+    ] = None,
 ) -> None:
     """Check for or explicitly apply a verified release update."""
     try:
-        result = (
-            check_for_update(force_check=force_check)
-            if check
-            else apply_update(confirm=yes)
-        )
+        # Distribution traffic is fail-closed: a caller must explicitly name a
+        # confirmed scope file.  No built-in GitHub exception or implicit
+        # policy is permitted here.
+        scope_guard = ScopeGuard.from_file(scope.absolute()) if scope is not None else None
+        if check:
+            if scope_guard is None:
+                result = check_for_update(force_check=force_check)
+            else:
+                result = check_for_update(force_check=force_check, scope_guard=scope_guard)
+        elif scope_guard is None:
+            result = apply_update(confirm=yes)
+        else:
+            result = apply_update(confirm=yes, scope_guard=scope_guard)
     except Exception as error:
         # Never expose transport, filesystem, URL, or release-body details.
         del error
