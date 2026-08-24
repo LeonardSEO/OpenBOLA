@@ -15,9 +15,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import datetime
-from typing import Literal, NoReturn, SupportsIndex, TypeAlias
+from typing import Any, Literal, NoReturn, SupportsIndex, TypeAlias
 from urllib.parse import quote, urlsplit, urlunsplit
 
+from openbola.executor import ProbeExecutor, ScopedExchange
 from openbola.handles import ValueHandle
 from openbola.models import ProbeMode, ProbeTarget
 from openbola.scope import (
@@ -178,15 +179,6 @@ class MutationOutcome:
 
 
 @dataclass(frozen=True)
-class ScopedExchange:
-    status: int | None
-    body_fingerprint: str | None
-    object_values: tuple[str, ...]
-    error_code: str | None = None
-    sent: bool = False
-
-
-@dataclass(frozen=True)
 class RecoveryStatus:
     state: Literal["clear", "required", "escalated", "blocked"]
     journal_present: bool
@@ -264,17 +256,25 @@ def preflight_sweep(
 
 
 class MutationSweepExecutor:
-    """Execution facade reserved for the state-machine task.
+    """Preflight and execute a deterministic, reversible mutation sweep."""
 
-    Task 1 intentionally exposes only the preflight boundary.  The method is
-    useful to integrations while making it impossible to accidentally send a
-    request before a plan exists.
-    """
-
-    def __init__(self, scope_guard: ScopeGuard) -> None:
-        if not isinstance(scope_guard, ScopeGuard):
-            raise TypeError("scope_guard must be a ScopeGuard")
-        self.scope_guard = scope_guard
+    def __init__(
+        self,
+        scope_guard_or_executor: ScopeGuard | ProbeExecutor,
+        value_registry: Any | None = None,
+        *,
+        journal: Any | None = None,
+    ) -> None:
+        if isinstance(scope_guard_or_executor, ProbeExecutor):
+            self.executor: ProbeExecutor | None = scope_guard_or_executor
+            self.scope_guard = scope_guard_or_executor.scope_guard
+        elif isinstance(scope_guard_or_executor, ScopeGuard):
+            self.executor = None
+            self.scope_guard = scope_guard_or_executor
+        else:
+            raise TypeError("scope guard or probe executor is invalid")
+        self.value_registry = value_registry
+        self.journal = journal
 
     def preflight(
         self,
@@ -290,6 +290,260 @@ class MutationSweepExecutor:
             grant,
             discovery_complete=discovery_complete,
             now=now,
+        )
+
+    def sweep(
+        self,
+        plan: MutationSweepPlan,
+        *,
+        executor: ProbeExecutor | None = None,
+        value_registry: Any | None = None,
+        journal: Any | None = None,
+    ) -> tuple[MutationOutcome, ...]:
+        """Run the five requests for each preflighted existing-record candidate.
+
+        A failed or uncertain cleanup is a global stop condition.  Later
+        records are returned as ``skipped`` and no write is dispatched for
+        them.  No response body or restore value is copied into outcomes.
+        """
+
+        if type(plan) is not MutationSweepPlan:
+            raise TypeError("sweep requires a MutationSweepPlan")
+        active_executor = executor or self.executor
+        if not isinstance(active_executor, ProbeExecutor):
+            raise TypeError("sweep requires a ProbeExecutor")
+        registry = value_registry or self.value_registry
+        if registry is None or not hasattr(registry, "resolve_value"):
+            raise TypeError("sweep requires an in-memory value registry")
+        active_journal = journal if journal is not None else self.journal
+
+        outcomes: list[MutationOutcome] = []
+        blocked = False
+        for candidate in plan.candidates:
+            if blocked:
+                outcomes.append(
+                    MutationOutcome(
+                        record_handle=candidate.record_handle,
+                        status="skipped",
+                        mutation_verified=False,
+                        restore_verified=False,
+                        error_code="cleanup_unverified",
+                    )
+                )
+                continue
+            outcome, must_stop = self._run_candidate(
+                candidate,
+                active_executor,
+                registry,
+                active_journal,
+            )
+            outcomes.append(outcome)
+            blocked = must_stop
+        return tuple(outcomes)
+
+    # ``run_sweep`` and ``run`` are intentionally small aliases for callers
+    # that treat this class as an executor rather than a phase facade.
+    run_sweep = sweep
+    run = sweep
+
+    @staticmethod
+    def _successful(exchange: ScopedExchange) -> bool:
+        return (
+            exchange.error_code is None
+            and exchange.status is not None
+            and 200 <= exchange.status < 300
+        )
+
+    @staticmethod
+    def _body(field: str, value: object) -> bytes:
+        import json
+
+        if not isinstance(field, str) or not field or len(field) > 256:
+            raise MutationPreflightError("mutation field is invalid")
+        try:
+            encoded = json.dumps(
+                {field: value}, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+        except (TypeError, ValueError, OverflowError) as error:
+            raise MutationPreflightError(
+                "mutation restore value is not JSON serializable"
+            ) from error
+        if len(encoded) > 256 * 1024:
+            raise MutationPreflightError("mutation restore body exceeds the safety limit")
+        return encoded
+
+    @staticmethod
+    def _journal_commit(
+        journal: Any | None,
+        candidate: MutationCandidate,
+        snapshot: ScopedExchange,
+    ) -> None:
+        if journal is None:
+            return
+        # Task 3 supplies the concrete encrypted journal.  Keep this adapter
+        # deliberately metadata-only so an older/no-op journal cannot receive
+        # the raw object id or original value.
+        commit = getattr(journal, "commit", None)
+        if commit is None:
+            commit = getattr(journal, "begin", None)
+        if commit is None:
+            raise RuntimeError("mutation journal does not provide a commit operation")
+        try:
+            commit(
+                record_handle=candidate.record_handle,
+                endpoint_handle=candidate.endpoint_handle,
+                field=candidate.field,
+                snapshot_fingerprint=snapshot.body_fingerprint,
+            )
+        except TypeError:
+            # A typed Task 3 implementation may accept a single journal
+            # record object instead; the caller owns that adaptation.
+            commit(candidate.record_handle, snapshot.body_fingerprint)
+
+    def _run_candidate(
+        self,
+        candidate: MutationCandidate,
+        executor: ProbeExecutor,
+        registry: Any,
+        journal: Any | None,
+    ) -> tuple[MutationOutcome, bool]:
+        target = candidate.target
+        operation = candidate.mutation
+        request_kwargs = {
+            "endpoint_template": operation.endpoint_template,
+            "content_type": "application/json",
+            "id_field": candidate.field,
+        }
+        snapshot_kwargs = {
+            "method": "GET",
+            "endpoint_template": operation.endpoint_template,
+            "content_type": "application/json",
+            "id_field": candidate.field,
+        }
+        snapshot = executor.request_scoped(
+            target,
+            target.owner_credential,
+            body=None,
+            **snapshot_kwargs,
+        )
+        if not self._successful(snapshot) or not snapshot.object_values:
+            return (
+                MutationOutcome(
+                    candidate.record_handle,
+                    "inconclusive",
+                    False,
+                    False,
+                    "snapshot_failed",
+                ),
+                False,
+            )
+        try:
+            self._journal_commit(journal, candidate, snapshot)
+        except BaseException:
+            return (
+                MutationOutcome(
+                    candidate.record_handle,
+                    "inconclusive",
+                    False,
+                    False,
+                    "journal_failed",
+                ),
+                True,
+            )
+
+        canary = candidate.canary_value
+        canary_exchange: ScopedExchange | None = None
+        canary_error: str | None = None
+        try:
+            canary_exchange = executor.request_scoped(
+                target,
+                target.owner_credential,
+                body=self._body(candidate.field, canary),
+                method=operation.method,
+                **request_kwargs,
+            )
+        except BaseException:
+            canary_error = "mutation_dispatch_failed"
+
+        mutation_verified = False
+        if (
+            canary_error is None
+            and canary_exchange is not None
+            and self._successful(canary_exchange)
+        ):
+            try:
+                attacker = executor.request_scoped(
+                    target,
+                    target.attacker_credential,
+                    body=None,
+                    method="GET",
+                    **request_kwargs,
+                )
+                mutation_verified = self._successful(attacker) and canary in attacker.object_values
+                if not mutation_verified:
+                    canary_error = "attacker_verification_failed"
+            except BaseException:
+                canary_error = "attacker_verification_failed"
+        elif canary_error is None:
+            canary_error = "mutation_failed"
+
+        restore_verified = False
+        restore_error: str | None = None
+        try:
+            original = registry.resolve_value(candidate.original_value)
+            restore = executor.request_scoped(
+                target,
+                target.owner_credential,
+                body=self._body(candidate.field, original),
+                method=operation.method,
+                **request_kwargs,
+            )
+            if not self._successful(restore):
+                restore_error = "cleanup_unverified"
+            else:
+                try:
+                    verification = executor.request_scoped(
+                        target,
+                        target.owner_credential,
+                        body=None,
+                        method="GET",
+                        **request_kwargs,
+                    )
+                    restore_verified = self._successful(verification) and str(
+                        original
+                    ) in verification.object_values
+                except BaseException:
+                    restore_verified = False
+                if not restore_verified:
+                    restore_error = "cleanup_unverified"
+        except BaseException:
+            restore_error = "cleanup_unverified"
+
+        if restore_error is not None:
+            return (
+                MutationOutcome(
+                    candidate.record_handle,
+                    "inconclusive",
+                    mutation_verified,
+                    False,
+                    restore_error,
+                ),
+                True,
+            )
+        if not mutation_verified:
+            return (
+                MutationOutcome(
+                    candidate.record_handle,
+                    "inconclusive",
+                    False,
+                    True,
+                    canary_error or "attacker_verification_failed",
+                ),
+                True,
+            )
+        return (
+            MutationOutcome(candidate.record_handle, "verified", True, True),
+            False,
         )
 
 

@@ -190,6 +190,22 @@ class _Exchange:
     cleanup_failed: bool = False
 
 
+@dataclass(frozen=True)
+class ScopedExchange:
+    """Redacted result of one policy-approved request.
+
+    Response bodies are deliberately not part of this contract.  Callers get
+    only the bounded object-field values and a fingerprint calculated while
+    the response stream is still open.
+    """
+
+    status: int | None
+    body_fingerprint: str | None
+    object_values: tuple[str, ...]
+    error_code: str | None = None
+    sent: bool = False
+
+
 class _ResponseTooLarge(Exception):
     pass
 
@@ -361,6 +377,64 @@ class ProbeExecutor:
             return self._run_locked(target, mutation)
         finally:
             self._semaphore.release()
+
+    def request_scoped(
+        self,
+        target: ProbeTarget,
+        credential: Any,
+        *,
+        method: str,
+        endpoint_template: str,
+        body: bytes | str | Mapping[str, Any] | None,
+        content_type: str | None,
+        id_field: str,
+    ) -> ScopedExchange:
+        """Dispatch exactly one request through this executor's policy boundary.
+
+        This is intentionally package-visible API for mutation and recovery
+        phases.  It is not a second HTTP client: URL construction, redirect
+        handling, peer checks, credential resolution, rate limiting and
+        response bounds all remain in the executor's existing path.
+        """
+
+        if type(target) is not ProbeTarget:
+            raise ExecutorError("scoped request target is invalid")
+        if not isinstance(method, str) or not _HTTP_METHOD.fullmatch(method):
+            raise ExecutorError("scoped request method is invalid")
+        if method != method.upper():
+            raise ExecutorError("scoped request method must be uppercase")
+        if not isinstance(id_field, str) or not id_field or len(id_field) > 256:
+            raise ExecutorError("scoped request field is invalid")
+        if credential not in (target.owner_credential, target.attacker_credential):
+            raise ExecutorError("scoped request credential is not bound to target")
+        if credential.identity not in {target.owner_identity, target.attacker_identity}:
+            raise ExecutorError("scoped request credential identity is invalid")
+        request_url = _fill_url(target.base_url, endpoint_template, target.object_id)
+        request_body, default_content_type = _safe_body(body)
+        request_content_type = content_type or default_content_type
+        exchange = self._request_with_redirects(
+            method,
+            request_url,
+            credential,
+            id_field,
+            body=request_body,
+            content_type=request_content_type,
+            # Redirects are never delegated to httpx.  Safe reads may be
+            # followed by our explicit per-hop guard; writes stop at the
+            # first redirect and therefore cannot be replayed.
+            allow_redirects=method in _SAFE_METHODS,
+        )
+        return ScopedExchange(
+            status=exchange.response.status if exchange.response is not None else None,
+            body_fingerprint=(
+                exchange.response.body_fingerprint if exchange.response is not None else None
+            ),
+            object_values=(
+                exchange.response.object_values if exchange.response is not None else ()
+            ),
+            error_code=exchange.error_code,
+            sent=exchange.sent,
+        )
 
     def _run_locked(self, target: ProbeTarget, mutation: MutationSpec | None) -> ProbeResult:
         try:

@@ -4,10 +4,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import yaml
 
-from openbola.handles import ValueHandle
+from openbola.credentials import CredentialVault
+from openbola.executor import ExecutorLimits, ProbeExecutor
+from openbola.handles import InMemorySessionValueRegistry, ValueHandle
 from openbola.models import CredentialKind, CredentialRef, ProbeMode, ProbeTarget
 from openbola.mutations import (
     MAX_MUTATION_REQUESTS,
@@ -277,3 +280,89 @@ def test_runtime_mutation_material_is_redacted_and_not_serializable(tmp_path: Pa
         pickle.dumps(candidate)
     with pytest.raises(TypeError, match="cannot be serialized"):
         pickle.dumps(plan)
+
+
+def test_sweep_orders_snapshot_canary_attacker_restore_and_verify(tmp_path: Path) -> None:
+    guard = _guard(tmp_path, record_scope="explicit")
+    candidate = _candidate()
+    vault = CredentialVault()
+    owner_ref = vault.store(
+        identity="owner", kind=CredentialKind.BEARER, name="authorization", secret="owner"  # noqa: S106
+    )
+    attacker_ref = vault.store(
+        identity="attacker", kind=CredentialKind.BEARER, name="authorization", secret="attacker"  # noqa: S106
+    )
+    object.__setattr__(candidate.target, "owner_credential", owner_ref)
+    object.__setattr__(candidate.target, "attacker_credential", attacker_ref)
+    registry = InMemorySessionValueRegistry()
+    original = registry.store_value(kind="field_value", value="old@example.test")
+    object.__setattr__(candidate, "original_value", original)
+
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        identity = request.headers["authorization"]
+        calls.append((request.method, identity))
+        if request.method == "GET":
+            value = "old@example.test" if identity == "Bearer owner" else "canary-record-1"
+            return httpx.Response(200, json={"email": value})
+        return httpx.Response(200, json={"email": "canary-record-1"})
+
+    probe = ProbeExecutor(
+        guard,
+        vault,
+        transport=httpx.MockTransport(handler),
+        now=NOW,
+        limits=ExecutorLimits(requests_per_second=1_000),
+    )
+    plan = preflight_sweep((candidate,), guard, now=NOW)
+    outcomes = MutationSweepExecutor(probe, registry).sweep(plan)
+
+    assert [method for method, _ in calls] == ["GET", "PATCH", "GET", "PATCH", "GET"]
+    assert calls[2][1] == "Bearer attacker"
+    assert calls[1][1] == calls[3][1] == calls[4][1] == "Bearer owner"
+    assert outcomes[0].status == "verified"
+    assert "old@example.test" not in repr(outcomes)
+
+
+def test_sweep_stops_after_unverified_restore_and_skips_later_records(tmp_path: Path) -> None:
+    guard = _guard(tmp_path, record_scope="explicit", max_records=2)
+    first = _candidate(record="record-1")
+    second = _candidate(record="record-2", object_id="two")
+    vault = CredentialVault()
+    owner_ref = vault.store(
+        identity="owner", kind=CredentialKind.BEARER, name="authorization", secret="owner"  # noqa: S106
+    )
+    attacker_ref = vault.store(
+        identity="attacker", kind=CredentialKind.BEARER, name="authorization", secret="attacker"  # noqa: S106
+    )
+    registry = InMemorySessionValueRegistry()
+    for candidate in (first, second):
+        object.__setattr__(candidate.target, "owner_credential", owner_ref)
+        object.__setattr__(candidate.target, "attacker_credential", attacker_ref)
+        object.__setattr__(
+            candidate,
+            "original_value",
+            registry.store_value(kind="field_value", value="old@example.test"),
+        )
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.method == "PATCH" and len([item for item in calls if item[0] == "PATCH"]) == 2:
+            return httpx.Response(500)
+        return httpx.Response(200, json={"email": "old@example.test"})
+
+    probe = ProbeExecutor(
+        guard,
+        vault,
+        transport=httpx.MockTransport(handler),
+        now=NOW,
+        limits=ExecutorLimits(requests_per_second=1_000),
+    )
+    plan = preflight_sweep(MutationCandidateInventory((first, second), True), guard, now=NOW)
+    outcomes = MutationSweepExecutor(probe, registry).sweep(plan)
+
+    assert outcomes[0].error_code == "cleanup_unverified"
+    assert outcomes[1].status == "skipped"
+    assert len(calls) == 4
