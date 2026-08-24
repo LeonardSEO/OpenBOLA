@@ -47,9 +47,34 @@ plans before it.
    - **P4a** — contracts (`ProviderConfidence`, `FieldInventory`,
      `ResourceInventory`, `ProviderDetection`, `ProviderAdapter`) plus the
      generic HTTP adapter, reusing `endpoints.py`'s existing `templatize()`
-     path-templating rather than reimplementing it.
+     path-templating rather than reimplementing it. *Status: complete,
+     merged to main (2026-08-24).* Final review (opus) surfaced and fixed
+     before merge: JSON-object-key IDs (Firebase/Stripe-shaped, and
+     email-shaped keys) now route to `record_handles` instead of leaking
+     into `FieldInventory.name`; `ProviderAdapter.name` is a read-only
+     `@property` (a bare `name: str` member would have broken any P4b/c/d
+     adapter using `ClassVar[str]` under mypy strict); `GenericAdapter`
+     groups internally by `(origin, template)` so same-shaped paths on
+     different hosts/tenants no longer merge into one `ResourceInventory`
+     (the public contract itself still carries no origin/base_url field —
+     see the deferred note below); HTTP methods are `.upper()`-normalized.
+     Deferred to later plans: `pipeline.py`'s `_record_from_mapping`/
+     `_normalize_record` path does NOT redact request/response bodies
+     (only `capture.py`'s ingestion path does) — `discovery.py` is safe by
+     construction (names only), but the "every RequestRecord is
+     body-redacted" premise doesn't hold project-wide and shouldn't be
+     trusted elsewhere without checking the ingestion path; whether
+     `ResourceInventory` needs an `origin`/`base_url` field is an open
+     design question for P4b (first adapter that actually needs to know
+     its host); `GenericAdapter.inventory()` mints a fresh handle per call
+     and isn't idempotent across reruns — relevant once P8's TUI
+     recomputes discovery incrementally as capture progresses; sub-
+     threshold IDs (rejected by `endpoints.is_object_id`) still survive
+     into `endpoint_template`/`resource_name` verbatim — pre-existing in
+     `endpoints.templatize`, same leak class as the JSON-key issue just
+     fixed, tracked together for a future `endpoints.py` pass.
    - **P4b/P4c/P4d** — Supabase/PostgREST, Firebase, Hasura adapters,
-     written just-in-time after P4a lands its contract.
+     written just-in-time now that P4a's contract has landed.
 
    Ruling: every `RequestRecord` this codebase produces today (from both
    `capture.py`'s live collector and its HAR parser) already has its body
