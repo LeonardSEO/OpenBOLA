@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -179,24 +178,29 @@ def test_vault_that_returns_none_fails_closed(tmp_path: Path) -> None:
     assert installer.install_calls == []
 
 
-def test_playwright_install_discards_unbounded_subprocess_output(
+def test_playwright_install_refuses_unscoped_distribution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default adapter must never invoke Playwright's network installer."""
+
+    monkeypatch.setattr(setup_impl, "_playwright_available", lambda: True)
+    with pytest.raises(setup_impl.SetupError) as error:
+        setup_impl.PlaywrightInstaller().install()
+
+    assert error.value.code == "scope_required"
+
+
+def test_default_installer_fails_closed_without_running_a_distribution_request(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(setup_impl, "_playwright_available", lambda: True)
-    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(setup_impl, "_playwright_available", lambda: False)
+    result = run_setup(
+        root=tmp_path / "OpenBOLA",
+        installer=setup_impl.PlaywrightInstaller(),
+        browser_self_test=FakeSelfTest(),
+        vault=FakeVault(),
+    )
 
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        calls.append({"command": command, **kwargs})
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(setup_impl.subprocess, "run", fake_run)
-    setup_impl.PlaywrightInstaller().install()
-
-    assert len(calls) == 1
-    assert calls[0]["stdout"] is subprocess.DEVNULL
-    assert calls[0]["stderr"] is subprocess.DEVNULL
-    assert "capture_output" not in calls[0]
-    assert calls[0]["shell"] is False
+    assert result == SetupResult("unavailable", "ready", "failed", "scope_required")
 
 
 def test_self_test_failure_does_not_publish_partial_marker(tmp_path: Path) -> None:

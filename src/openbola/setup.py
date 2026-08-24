@@ -1,9 +1,13 @@
 """Safe, explicit setup of local OpenBOLA prerequisites.
 
 The setup command is deliberately kept separate from the assessment engine.  It
-may install the Playwright browser selected by the installed Playwright
-package, and it may check the P6 recovery-key boundary, but it never receives a
-target URL and never constructs an HTTP client.  All external operations are
+checks a locally provisioned Playwright browser and the P6 recovery-key
+boundary, but it never receives a target URL and never constructs an HTTP
+client.  In particular, the default Playwright adapter refuses to download a
+browser: Playwright's package installer owns its distribution URLs and cannot
+prove a :class:`~openbola.scope.ScopeGuard` decision for each request.  A
+browser must therefore be provisioned by an explicitly reviewed, scoped
+deployment boundary before this command is run.  All external operations are
 behind small protocols so the command can be tested without a browser,
 subprocess, network, or operating-system vault.
 """
@@ -17,8 +21,6 @@ import inspect
 import json
 import os
 import stat
-import subprocess
-import sys
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -37,7 +39,6 @@ SETUP_MARKER_SCHEMA: Final = "openbola-setup-v1"
 _MARKER_MODE: Final = 0o600
 _DIRECTORY_MODE: Final = 0o700
 _MAX_MARKER_BYTES: Final = 16_384
-_INSTALL_TIMEOUT_SECONDS: Final = 300.0
 _RECOVERY_KEY_BYTES: Final = 32
 
 
@@ -48,7 +49,15 @@ class BrowserInstaller(Protocol):
         """Return whether the pinned Chromium browser is available locally."""
 
     def install(self, *, force: bool = False) -> None:
-        """Install the browser selected by the installed Playwright package."""
+        """Refuse an unscoped Playwright distribution download.
+
+        ``playwright install`` performs network requests to package-controlled
+        distribution endpoints.  Calling it here would bypass OpenBOLA's
+        mandatory :class:`~openbola.scope.ScopeGuard` boundary because the
+        Playwright subprocess does not expose each resolved URL/peer for an
+        authorization decision.  Keep this adapter as a bounded refusal until
+        a reviewed, ScopeGuard-aware provisioning adapter exists.
+        """
 
 
 class BrowserSelfTest(Protocol):
@@ -282,23 +291,8 @@ class PlaywrightInstaller:
             return False
 
     def install(self, *, force: bool = False) -> None:
-        del force  # Playwright's command is idempotent; the caller controls when it runs.
-        if not _playwright_available():
-            raise SetupError("browser_unavailable")
-        command = [sys.executable, "-m", "playwright", "install", "chromium"]
-        try:
-            completed = subprocess.run(  # noqa: S603
-                command,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=_INSTALL_TIMEOUT_SECONDS,
-                shell=False,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            raise SetupError("browser_install_failed") from error
-        if completed.returncode != 0:
-            raise SetupError("browser_install_failed")
+        del force
+        raise SetupError("scope_required")
 
 
 class PlaywrightSelfTest:

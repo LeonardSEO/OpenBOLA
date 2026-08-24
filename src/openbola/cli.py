@@ -70,6 +70,7 @@ _SAFE_SETUP_REASONS = frozenset(
         "setup_marker_invalid",
         "setup_marker_missing",
         "setup_marker_untrusted",
+        "scope_required",
         "vault_unavailable",
     }
 )
