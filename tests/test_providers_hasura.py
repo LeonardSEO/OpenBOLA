@@ -1,11 +1,34 @@
 from __future__ import annotations
 
+import json
+
+from openbola.capture import AdapterRecordView
+from openbola.discovery import ProviderConfidence
+from openbola.handles import InMemorySessionValueRegistry
+from openbola.models import RequestRecord
 from openbola.providers.hasura import (
+    HasuraAdapter,
     _parse_operation,
     _ParsedOperation,
     _resource_name,
     _RootSelection,
 )
+
+
+def _view(
+    body: dict[str, object],
+    *,
+    url: str = "https://api.example.test/v1/graphql",
+    headers: dict[str, str] | None = None,
+    method: str = "POST",
+    response: dict[str, object] | None = None,
+) -> AdapterRecordView:
+    record = RequestRecord("alice", method, url, headers or {}, b'{"query":"[REDACTED]"}', 200)
+    return AdapterRecordView(
+        record=record,
+        request_body=json.dumps(body).encode(),
+        response_body=json.dumps(response).encode() if response is not None else None,
+    )
 
 
 def test_parse_query_root_alias_variables_and_selected_fields() -> None:
@@ -83,3 +106,58 @@ def test_parse_accepts_variable_definition_types_defaults_and_trailing_commas() 
 def test_parse_fails_closed_before_python_recursion_limit() -> None:
     nested = "query { orders " + "{ child " * 140 + "id" + " }" * 140 + " }"
     assert _parse_operation(nested) is None
+
+
+def test_detect_confirmed_from_graphql_payload_and_case_insensitive_hasura_header() -> None:
+    adapter = HasuraAdapter(InMemorySessionValueRegistry())
+    record = _view(
+        {"query": "query { orders { id total } }"},
+        headers={"X-Hasura-Role": "user"},
+    )
+    assert adapter.detect([record]).confidence is ProviderConfidence.CONFIRMED
+
+
+def test_detect_inferred_without_a_hasura_marker_and_unknown_without_graphql() -> None:
+    adapter = HasuraAdapter(InMemorySessionValueRegistry())
+    inferred = _view({"query": "query { orders { id } }"})
+    unknown = _view({"queryText": "not graphql"}, url="https://api.example.test/health")
+    assert adapter.detect([inferred]).confidence is ProviderConfidence.INFERRED
+    assert adapter.detect([unknown]).confidence is ProviderConfidence.UNKNOWN
+
+
+def test_inventory_requires_confirmed_hasura_evidence_per_origin() -> None:
+    adapter = HasuraAdapter(InMemorySessionValueRegistry())
+    confirmed = _view(
+        {"query": "query { orders { id total } }"},
+        headers={"x-hasura-role": "user"},
+        url="https://tenant-a.example.test/v1/graphql",
+    )
+    generic = _view(
+        {"query": "query { orders { id leaked } }"},
+        url="https://tenant-b.example.test/v1/graphql",
+    )
+    inventories = adapter.inventory([confirmed, generic])
+    assert len(inventories) == 1
+    assert inventories[0].resource_name == "orders"
+    assert {field.name for field in inventories[0].fields} == {"id", "total"}
+    assert inventories[0].endpoint_template == "/v1/graphql"
+    assert inventories[0].observed_methods == frozenset({"POST"})
+
+
+def test_inventory_does_not_merge_same_resource_across_origins_or_ports() -> None:
+    adapter = HasuraAdapter(InMemorySessionValueRegistry())
+    body = {"query": "query { orders { id } }"}
+    records = [
+        _view(body, headers={"x-hasura-role": "user"}, url="https://API.example.test:8443/v1/graphql"),
+        _view(body, headers={"x-hasura-role": "user"}, url="https://api.example.test:9443/v1/graphql"),
+    ]
+    assert len(adapter.inventory(records)) == 2
+
+
+def test_detection_never_exposes_header_values() -> None:
+    sentinel = "this-admin-secret-must-never-appear"  # noqa: S105
+    adapter = HasuraAdapter(InMemorySessionValueRegistry())
+    detection = adapter.detect([
+        _view({"query": "query { orders { id } }"}, headers={"x-hasura-admin-secret": sentinel})
+    ])
+    assert sentinel not in repr(detection)

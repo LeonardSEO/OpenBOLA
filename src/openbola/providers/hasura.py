@@ -8,9 +8,25 @@ captured documents out of provider-owned state and makes malformed input fail cl
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
+from urllib.parse import urlsplit
+
+from openbola.discovery import (
+    FieldInventory,
+    ProviderAdapter,
+    ProviderConfidence,
+    ProviderDetection,
+    ResourceInventory,
+    adapter_record,
+)
+from openbola.handles import InMemorySessionValueRegistry
+
+if TYPE_CHECKING:
+    from openbola.capture import AdapterRecordView
 
 
 @dataclass(frozen=True)
@@ -448,3 +464,160 @@ def _resource_name(root_field: str) -> str | None:
             root_field = root_field[: -len(suffix)]
             break
     return root_field if re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*", root_field) else None
+
+
+_HASURA_HEADER_NAMES = frozenset({"x-hasura-role", "x-hasura-admin-secret"})
+_GRAPHQL_PATHS = frozenset({"/graphql", "/v1/graphql"})
+_REDACTED = "[REDACTED]"
+
+
+def _origin(url: str) -> str | None:
+    """Return a normalized origin, omitting userinfo and preserving explicit ports."""
+
+    try:
+        split = urlsplit(url)
+        hostname = split.hostname
+        if not split.scheme or hostname is None:
+            return None
+        port = split.port
+    except ValueError:
+        return None
+    port_suffix = f":{port}" if port is not None else ""
+    return f"{split.scheme.casefold()}://{hostname.casefold()}{port_suffix}"
+
+
+def _request_json(view: AdapterRecordView) -> Mapping[str, object] | None:
+    body = view.request_body
+    if body is None:
+        return None
+    try:
+        decoded = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return None
+    if not isinstance(decoded, Mapping):
+        return None
+    if not all(isinstance(key, str) for key in decoded):
+        return None
+    return decoded
+
+
+def _graphql_document(view: AdapterRecordView) -> str | None:
+    payload = _request_json(view)
+    if payload is None:
+        return None
+    query = payload.get("query")
+    if not isinstance(query, str) or query == _REDACTED:
+        return None
+    return query
+
+
+def _has_hasura_header(headers: Mapping[str, str]) -> bool:
+    return any(name.casefold() in _HASURA_HEADER_NAMES for name in headers)
+
+
+def _is_graphql_payload(view: AdapterRecordView) -> bool:
+    document = _graphql_document(view)
+    return document is not None and _parse_operation(document) is not None
+
+
+class HasuraAdapter:
+    """Read-only Hasura GraphQL discovery adapter."""
+
+    name = "hasura"
+
+    def __init__(self, registry: InMemorySessionValueRegistry) -> None:
+        self._registry = registry
+
+    def detect(self, records: Sequence[AdapterRecordView]) -> ProviderDetection:
+        inferred = False
+        for view in records:
+            record = adapter_record(view)
+            try:
+                path = urlsplit(record.url).path
+            except ValueError:
+                path = ""
+            graphql_payload = _is_graphql_payload(view)
+            if graphql_payload and _has_hasura_header(record.headers):
+                return ProviderDetection(
+                    provider=self.name,
+                    confidence=ProviderConfidence.CONFIRMED,
+                )
+            if graphql_payload or path in _GRAPHQL_PATHS:
+                inferred = True
+        confidence = ProviderConfidence.INFERRED if inferred else ProviderConfidence.UNKNOWN
+        return ProviderDetection(provider=self.name, confidence=confidence)
+
+    def inventory(self, records: Sequence[AdapterRecordView]) -> tuple[ResourceInventory, ...]:
+        by_origin: dict[str, list[AdapterRecordView]] = {}
+        for view in records:
+            origin = _origin(adapter_record(view).url)
+            if origin is not None:
+                by_origin.setdefault(origin, []).append(view)
+
+        groups: dict[tuple[str, str, str], list[AdapterRecordView]] = {}
+        for origin, origin_records in sorted(by_origin.items()):
+            if self.detect(origin_records).confidence is not ProviderConfidence.CONFIRMED:
+                continue
+            for view in origin_records:
+                document = _graphql_document(view)
+                if document is None:
+                    continue
+                parsed = _parse_operation(document)
+                if parsed is None:
+                    continue
+                try:
+                    path = urlsplit(adapter_record(view).url).path
+                except ValueError:
+                    continue
+                for root in parsed.roots:
+                    resource_name = _resource_name(root.field_name)
+                    if resource_name is None:
+                        continue
+                    groups.setdefault((origin, path, resource_name), []).append(view)
+
+        inventories: list[ResourceInventory] = []
+        for origin, path, resource_name in sorted(groups):
+            group = groups[(origin, path, resource_name)]
+            confidence = self.detect(group).confidence
+            field_names: set[str] = set()
+            for view in group:
+                document = _graphql_document(view)
+                if document is None:
+                    continue
+                parsed = _parse_operation(document)
+                if parsed is None:
+                    continue
+                for root in parsed.roots:
+                    if _resource_name(root.field_name) != resource_name:
+                        continue
+                    selected = (
+                        root.mutation_returning_fields
+                        if parsed.operation_kind == "mutation"
+                        else root.selected_fields
+                    )
+                    field_names.update(
+                        field
+                        for field in selected
+                        if re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*", field)
+                    )
+            methods = frozenset(adapter_record(view).method.upper() for view in group)
+            inventories.append(
+                ResourceInventory(
+                    provider=self.name,
+                    provider_confidence=confidence,
+                    resource_name=resource_name,
+                    endpoint_template=path or "/",
+                    fields=tuple(FieldInventory(name=name) for name in sorted(field_names)),
+                    record_handles=(),
+                    observed_methods=methods,
+                )
+            )
+        return tuple(inventories)
+
+
+if TYPE_CHECKING:
+
+    def _hasura_adapter_satisfies_provider_adapter(
+        registry: InMemorySessionValueRegistry,
+    ) -> ProviderAdapter:
+        return HasuraAdapter(registry)
