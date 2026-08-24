@@ -54,7 +54,7 @@ class Diagnostic:
             raise ValueError("diagnostic name is invalid")
         if any(character not in "abcdefghijklmnopqrstuvwxyz0123456789_" for character in self.name):
             raise ValueError("diagnostic name is invalid")
-        if self.status not in {"ok", "warning", "blocked"}:
+        if self.status not in ("ok", "warning", "blocked"):
             raise ValueError("diagnostic status is invalid")
         if type(self.code) is not str or not self.code or len(self.code) > _MAX_CODE_LENGTH:
             raise ValueError("diagnostic code is invalid")
@@ -77,14 +77,14 @@ class DiagnosticReport:
     def __post_init__(self) -> None:
         if not isinstance(self.diagnostics, tuple):
             raise ValueError("diagnostics must be immutable")
-        if self.recovery_state not in {"clear", "required", "escalated", "blocked"}:
+        if self.recovery_state not in ("clear", "required", "escalated", "blocked"):
             raise ValueError("recovery state is invalid")
+        if any(type(item) is not Diagnostic for item in self.diagnostics):
+            raise ValueError("diagnostic value is invalid")
         if tuple(item.name for item in self.diagnostics) != tuple(
             sorted(item.name for item in self.diagnostics)
         ):
             raise ValueError("diagnostics must be sorted")
-        if any(type(item) is not Diagnostic for item in self.diagnostics):
-            raise ValueError("diagnostic value is invalid")
 
     @property
     def blocked(self) -> bool:
@@ -161,10 +161,13 @@ def _normalise_probe(value: object, *, ok_code: str, fail_code: str) -> _ProbeRe
         return _result("warning", fail_code)
     if isinstance(value, tuple) and len(value) == 2:
         status, code = value
-        if status in {"ok", "warning", "blocked"} and isinstance(code, str):
+        if status in ("ok", "warning", "blocked") and isinstance(code, str):
             return _result(cast(DiagnosticStatus, status), code)
     if isinstance(value, Mapping):
-        ready = value.get("ready")
+        try:
+            ready = value.get("ready")
+        except Exception:
+            return _result("warning", fail_code)
         if type(ready) is bool:
             return _result("ok" if ready else "warning", ok_code if ready else fail_code)
     return _result("warning", fail_code)
@@ -335,7 +338,7 @@ def _normalise_recovery(value: object) -> RecoveryState:
         state = value.get("state")
     elif not isinstance(value, str):
         state = getattr(value, "state", None)
-    if state in {"clear", "required", "escalated", "blocked"}:
+    if state in ("clear", "required", "escalated", "blocked"):
         return state
     return "blocked"
 
