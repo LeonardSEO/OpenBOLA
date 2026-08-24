@@ -328,8 +328,12 @@ boundaries. External P11 publication actions remain separately approval-gated.
 - P10 local packaging is complete across `c478d58`, `1d9cb65`, `eb28533`, and
   `8a02f14`: native specs, deterministic archives, checksum-verifying
   installers, guarded workflow with verified action pins, source/version gates,
-  and digest validation. Native macOS arm64 smoke passed; Windows x64,
-  macOS x64, and clean-machine acceptance remain CI/real-machine evidence.
+  and digest validation. A fresh native macOS arm64 PyInstaller 6.15.0 build
+  completed in a temporary directory; the frozen executable reported `0.1.0`,
+  and the generated archive passed `install.sh --bin-dir <temp> --yes
+  --no-path` followed by an installed-executable `--version` check. Windows
+  x64, macOS x64, clean-machine acceptance, and the eventual Textual-inclusive
+  bundle remain CI/real-machine evidence.
 - P11 local launch materials are complete across `90d31c9`, `073e6ca`,
   `8bffda3`, `2179ab6`, and `f0f5e96`: offline artwork, deterministic demo,
   validators, and an approval-gated GitHub checklist. External rename,
