@@ -340,6 +340,22 @@ def test_deeply_nested_provider_envelope_is_typed_error(tmp_path: Path) -> None:
         client.propose_tests(build_sanitized_context((_candidate(),)))
 
 
+def test_deeply_nested_proposal_content_is_typed_error(tmp_path: Path) -> None:
+    nested_content = "[" * 5000 + "0" + "]" * 5000
+    body = json.dumps({"choices": [{"message": {"content": nested_content}}]}).encode()
+    registry = InMemorySessionValueRegistry()
+    secret = registry.store_secret(purpose="provider_api_key", value=API_KEY)
+    guard = _scope(tmp_path / "provider.yaml", allowed_path="/v1/chat/completions")
+    client = OpenAICompatibleClient(
+        _config(api_key=secret),
+        secrets=registry,
+        provider_scope_guard=guard,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body)),
+    )
+    with pytest.raises(ProviderResponseError):
+        client.propose_tests(build_sanitized_context((_candidate(),)))
+
+
 def test_non_ascii_provider_secret_is_rejected_before_transport(tmp_path: Path) -> None:
     called = False
 

@@ -427,7 +427,7 @@ class OpenAICompatibleClient:
             if not isinstance(content, str):
                 raise ValueError
             return parse_proposed_plan(content)
-        except (ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError):
+        except (RecursionError, ValueError, TypeError, KeyError, IndexError, json.JSONDecodeError):
             raise ProviderResponseError("provider response is not a valid proposal") from None
 
 
