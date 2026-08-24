@@ -65,6 +65,70 @@ def test_parse_mutation_uses_returning_fields_not_wrapper_fields() -> None:
     assert _resource_name(root.field_name) == "orders"
 
 
+def test_mutation_inventory_uses_returning_fields_and_post_method() -> None:
+    adapter = HasuraAdapter(InMemorySessionValueRegistry())
+    record = _view(
+        {
+            "query": (
+                "mutation($id: uuid!, $name: String!) { "
+                "update_orders(where: {id: {_eq: $id}}, _set: {name: $name}) "
+                "{ affected_rows returning { id name } } }"
+            ),
+            "variables": {
+                "id": "550e8400-e29b-41d4-a716-446655440000",
+                "name": "changed",
+            },
+        },
+        headers={"x-hasura-role": "user"},
+    )
+    inventory = adapter.inventory([record])[0]
+    assert inventory.resource_name == "orders"
+    assert {field.name for field in inventory.fields} == {"id", "name"}
+    assert inventory.observed_methods == frozenset({"POST"})
+
+
+def test_mutation_without_returning_selection_reports_no_envelope_fields() -> None:
+    adapter = HasuraAdapter(InMemorySessionValueRegistry())
+    record = _view(
+        {
+            "query": (
+                "mutation($id: uuid!) { "
+                "delete_orders(where: {id: {_eq: $id}}) { affected_rows } }"
+            ),
+            "variables": {"id": "550e8400-e29b-41d4-a716-446655440000"},
+        },
+        headers={"x-hasura-role": "user"},
+    )
+    assert adapter.inventory([record])[0].fields == ()
+
+
+def test_redacted_or_malformed_payload_is_skipped_without_exception() -> None:
+    adapter = HasuraAdapter(InMemorySessionValueRegistry())
+    redacted = AdapterRecordView(
+        record=RequestRecord(
+            "alice",
+            "POST",
+            "https://api.example.test/v1/graphql",
+            {"x-hasura-role": "[REDACTED]"},
+            b'{"query":"[REDACTED]"}',
+            200,
+        ),
+        request_body=b'{"query":"[REDACTED]"}',
+    )
+    malformed = AdapterRecordView(
+        record=RequestRecord(
+            "alice",
+            "POST",
+            "https://api.example.test/v1/graphql",
+            {"x-hasura-role": "[REDACTED]"},
+            b"[REDACTED]",
+            200,
+        ),
+        request_body=b"not-json",
+    )
+    assert adapter.inventory([redacted, malformed]) == ()
+
+
 def test_parse_ignores_variable_lookalikes_in_comments_and_strings() -> None:
     assert _parse_operation("# $fake\nquery { orders { note } }") is not None
     assert _parse_operation('query { orders { note(format: "$fake") } }') is not None

@@ -1019,6 +1019,7 @@ def _full_session_harness(
     response_body_error: BaseException | None = None,
     exchange_count: int = 1,
     off_scope_request: bool = False,
+    graphql_request: bool = False,
 ) -> tuple[Any, Any]:
     """Install a routed Playwright double that emits full-fidelity events."""
     from openbola import capture
@@ -1051,19 +1052,28 @@ def _full_session_harness(
 
     class FakeRequest:
         def __init__(self, index: int) -> None:
-            self.method = "GET"
+            self.method = "POST" if graphql_request else "GET"
             if off_scope_request and index == 0:
                 self.url = (
                     "https://outside.example.test/v1/items/"
                     "RAW_ID_4eC39HqLyjWDarjtT1zdp7dc"
                 )
+            elif graphql_request:
+                self.url = "https://api.example.test/v1/graphql"
             else:
                 self.url = f"https://api.example.test/v1/items/{index}"
             self.headers = {
                 "Authorization": "Bearer REQUEST_SECRET_SENTINEL",
                 "Content-Type": "application/json",
             }
-            self.post_data_buffer = b'{"id":"RAW_ID_4eC39HqLyjWDarjtT1zdp7dc"}'
+            if graphql_request:
+                self.headers["x-hasura-role"] = "user"
+                self.post_data_buffer = (
+                    b'{"query":"query($id: uuid!) { orders_by_pk(id: $id) { id total } }",'
+                    b'"variables":{"id":"RAW_ID_4eC39HqLyjWDarjtT1zdp7dc"}}'
+                )
+            else:
+                self.post_data_buffer = b'{"id":"RAW_ID_4eC39HqLyjWDarjtT1zdp7dc"}'
             self.post_data = self.post_data_buffer.decode()
 
     class FakeResponse:
@@ -1300,6 +1310,46 @@ def test_session_adapter_callback_sees_full_records_but_publishes_only_inventory
     assert "RAW_ID_4eC39HqLyjWDarjtT1zdp7dc" in {
         registry.resolve_value(handle) for handle in inventory[0].record_handles
     }
+
+
+def test_capture_session_adapter_view_discovers_hasura_without_persistence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pickle
+
+    from openbola import capture
+    from openbola.providers.hasura import HasuraAdapter
+
+    raw_id = "RAW_ID_4eC39HqLyjWDarjtT1zdp7dc"
+    registry, config = _full_session_harness(
+        tmp_path,
+        monkeypatch,
+        graphql_request=True,
+        response_body=(
+            b'{"data":{"orders_by_pk":{"id":"'
+            + raw_id.encode()
+            + b'","total":9.5}}}'
+        ),
+    )
+    session = asyncio.run(capture.capture_session(config, Guard(), registry=registry))
+    captured_adapter_views: list[Any] = []
+
+    def discover(views: Any) -> tuple[Any, ...]:
+        captured_adapter_views.extend(views)
+        return HasuraAdapter(registry).inventory(views)
+
+    inventory = session.with_adapter_records(discover)
+    view = captured_adapter_views[0]
+    assert view.record.body == b'{"query":"[REDACTED]","variables":{"id":"[REDACTED]"}}'
+    assert view.request_body is not None
+    assert inventory[0].resource_name == "orders"
+    assert {field.name for field in inventory[0].fields} == {"id", "total"}
+    assert len(inventory[0].record_handles) == 1
+    assert raw_id not in repr(inventory)
+    sanitized_har = session.har_path
+    assert raw_id not in sanitized_har.read_text(encoding="utf-8")
+    with pytest.raises(TypeError, match="serialization"):
+        pickle.dumps(view)
 
 
 def test_session_adapter_callback_rejects_raw_result_escapes(
