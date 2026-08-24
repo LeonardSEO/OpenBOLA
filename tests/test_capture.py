@@ -1010,6 +1010,217 @@ def _login_config(tmp_path: Path, recipe: Any) -> Any:
     )
 
 
+def _full_session_harness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    response_body: bytes = b'{"id":"RAW_ID_4eC39HqLyjWDarjtT1zdp7dc","name":"FULL_VALUE_SENTINEL"}',
+    response_body_delay: bool = False,
+    exchange_count: int = 1,
+    off_scope_request: bool = False,
+) -> tuple[Any, Any]:
+    """Install a routed Playwright double that emits full-fidelity events."""
+    from openbola import capture
+    from openbola.capture import LoginRecipe
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    recipe = LoginRecipe(
+        name="full-session",
+        start_url="https://api.example.test/login",
+        username_selector="#email",
+        password_selector="#password",  # noqa: S106 - selector, not a secret
+        submit_selector="#submit",
+        success_url_pattern="**/dashboard",
+        username_secret=registry.store_secret(purpose="username", value="alice"),
+        password_secret=registry.store_secret(
+            purpose="password", value="REQUEST_SECRET_SENTINEL"
+        ),
+    )
+
+    class FakeRoute:
+        def __init__(self) -> None:
+            self.aborted = False
+
+        async def continue_(self, **_kwargs: object) -> None:
+            return None
+
+        async def abort(self, *_args: object) -> None:
+            self.aborted = True
+
+    class FakeRequest:
+        def __init__(self, index: int) -> None:
+            self.method = "GET"
+            if off_scope_request and index == 0:
+                self.url = (
+                    "https://outside.example.test/v1/items/"
+                    "RAW_ID_4eC39HqLyjWDarjtT1zdp7dc"
+                )
+            else:
+                self.url = f"https://api.example.test/v1/items/{index}"
+            self.headers = {
+                "Authorization": "Bearer REQUEST_SECRET_SENTINEL",
+                "Content-Type": "application/json",
+            }
+            self.post_data_buffer = b'{"id":"RAW_ID_4eC39HqLyjWDarjtT1zdp7dc"}'
+            self.post_data = self.post_data_buffer.decode()
+
+    class FakeResponse:
+        def __init__(self, request: FakeRequest) -> None:
+            self.request = request
+            self.status = 200
+            self.headers = {"Content-Type": "application/json"}
+
+        async def body(self) -> bytes:
+            if response_body_delay:
+                await asyncio.sleep(0)
+            return response_body
+
+    class Context:
+        def __init__(self) -> None:
+            self.handlers: dict[str, Any] = {}
+            self.route_handler: Any = None
+
+        def on(self, event: str, callback: object) -> None:
+            self.handlers[event] = callback
+
+        async def route(self, _pattern: str, handler: object) -> None:
+            self.route_handler = handler
+
+        async def new_page(self) -> "Page":
+            return Page(self)
+
+        async def storage_state(self) -> dict[str, object]:
+            return {"cookies": [{"name": "session", "value": "FULL_VALUE_SENTINEL"}]}
+
+        async def close(self) -> None:
+            return None
+
+    class Page:
+        def __init__(self, context: Context) -> None:
+            self.context = context
+
+        async def goto(self, _url: str, **_kwargs: object) -> None:
+            return None
+
+        async def fill(self, _selector: str, _value: str, **_kwargs: object) -> None:
+            return None
+
+        async def click(self, _selector: str, **_kwargs: object) -> None:
+            for index in range(exchange_count):
+                request = FakeRequest(index)
+                route = FakeRoute()
+                await self.context.route_handler(route, request)
+                if route.aborted:
+                    continue
+                self.context.handlers["request"](request)
+                self.context.handlers["response"](FakeResponse(request))
+
+        async def wait_for_url(self, _pattern: str, **_kwargs: object) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class Browser:
+        async def new_context(self, *, service_workers: str) -> Context:
+            assert service_workers == "block"
+            return Context()
+
+        async def close(self) -> None:
+            return None
+
+    class Chromium:
+        async def launch(self, **_kwargs: object) -> Browser:
+            return Browser()
+
+    class Manager:
+        async def __aenter__(self) -> object:
+            return SimpleNamespace(chromium=Chromium())
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class FakePlaywrightError(Exception):
+        pass
+
+    monkeypatch.setattr(
+        capture.importlib,
+        "import_module",
+        lambda _: SimpleNamespace(
+            async_playwright=lambda: Manager(),
+            Error=FakePlaywrightError,
+        ),
+    )
+    return registry, make_config(tmp_path, login_recipe=recipe)
+
+
+def test_capture_session_writes_sanitized_har_and_keeps_full_values_in_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbola import capture
+
+    registry, config = _full_session_harness(tmp_path, monkeypatch)
+
+    session = asyncio.run(capture.capture_session(config, Guard(), registry=registry))
+
+    [exchange] = session.exchanges
+    assert (
+        session.response_material(exchange).body
+        == b'{"id":"RAW_ID_4eC39HqLyjWDarjtT1zdp7dc","name":"FULL_VALUE_SENTINEL"}'
+    )
+    assert session.request_material(exchange).headers["Authorization"] == (
+        "Bearer REQUEST_SECRET_SENTINEL"
+    )
+    har_bytes = session.har_path.read_bytes()
+    assert b"FULL_VALUE_SENTINEL" not in har_bytes
+    assert b"RAW_ID_4eC39HqLyjWDarjtT1zdp7dc" not in har_bytes
+    assert b"REQUEST_SECRET_SENTINEL" not in har_bytes
+    [record] = capture.parse_har_records(session.har_path, "alice")
+    assert record.response_body is None
+    assert record.body != b'{"id":"RAW_ID_4eC39HqLyjWDarjtT1zdp7dc"}'
+
+
+def test_capture_session_awaits_response_body_before_returning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbola import capture
+
+    registry, config = _full_session_harness(
+        tmp_path, monkeypatch, response_body=b"FULL_VALUE_SENTINEL", response_body_delay=True
+    )
+    session = asyncio.run(capture.capture_session(config, Guard(), registry=registry))
+    assert session.response_material(session.exchanges[0]).body == b"FULL_VALUE_SENTINEL"
+
+
+@pytest.mark.parametrize(
+    ("response_body", "exchange_count", "message"),
+    [
+        (b"x" * (1024 * 1024 + 1), 1, "body"),
+        (b"x" * (1024 * 1024 - 1), 26, "session material"),
+    ],
+)
+def test_capture_session_fails_closed_at_full_material_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    response_body: bytes,
+    exchange_count: int,
+    message: str,
+) -> None:
+    from openbola import capture
+    registry, config = _full_session_harness(
+        tmp_path,
+        monkeypatch,
+        response_body=response_body,
+        exchange_count=exchange_count,
+    )
+    with pytest.raises(CaptureError, match=message):
+        asyncio.run(capture.capture_session(config, Guard(), registry=registry))
+    assert not (config.capture_root / config.output_path).exists()
+    with pytest.raises(RuntimeError, match="registry is closed"):
+        registry.store_value(kind="body", value=b"x")
+
+
 def test_capture_har_performs_automated_login(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -17,7 +18,8 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, NoReturn, Protocol, TypeVar
+from threading import RLock
+from typing import Any, Literal, NoReturn, Protocol, TypeVar, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from openbola.discovery import FieldInventory, ProviderConfidence, ResourceInventory
@@ -28,6 +30,9 @@ from openbola.scope import ScopeDecision, ScopeError, ScopeGuard
 DEFAULT_MAX_HAR_BYTES = 25 * 1024 * 1024
 _REDACTED = "[REDACTED]"
 _MAX_CAPTURE_ENTRIES = 10_000
+_MAX_FULL_BODY_BYTES = 1024 * 1024
+_MAX_FULL_STATE_BYTES = 1024 * 1024
+_MAX_FULL_SESSION_BYTES = 25 * 1024 * 1024
 _MAX_URL_CHARS = 16_384
 _MAX_QUERY_FIELDS = 256
 _MAX_HEADER_COUNT = 256
@@ -165,6 +170,18 @@ class SessionExchange:
     record: RequestRecord
     request_material_handle: ValueHandle
     response_material_handle: ValueHandle
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AdapterRecordView:
+    """Ephemeral adapter input with raw bodies valid only in one callback."""
+
+    record: RequestRecord
+    request_body: bytes | None = field(repr=False)
+    response_body: bytes | None = field(repr=False)
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError("Adapter record view serialization is disabled.")
 
 
 _SessionMaterial = TypeVar("_SessionMaterial", SessionRequestMaterial, SessionResponseMaterial)
@@ -437,6 +454,201 @@ class InMemoryEventCollector:
         return list(self._entries.values())
 
 
+class _FullFidelityEventCollector:
+    """Collect raw browser material behind opaque, process-local handles."""
+
+    def __init__(self, registry: SessionValueStore) -> None:
+        self._registry = registry
+        self._requests: dict[int, tuple[SessionRequestMaterial, ValueHandle]] = {}
+        self._request_order: list[int] = []
+        self._responses: dict[int, tuple[SessionResponseMaterial, ValueHandle]] = {}
+        self._response_tasks: dict[int, asyncio.Task[None]] = {}
+        self._task_errors: list[BaseException] = []
+        self._stream_incomplete = False
+        self._total_bytes = 0
+        self._lock = RLock()
+        self._sanitized_entries: list[dict[str, Any]] | None = None
+        self._identity: str | None = None
+
+    def attach(self, context: Any) -> None:
+        context.on("request", self._on_request)
+        context.on("response", self._on_response)
+
+    def set_sanitized_entries(self, entries: list[dict[str, Any]], identity: str) -> None:
+        self._sanitized_entries = entries
+        self._identity = identity
+
+    def _on_request(self, request: Any) -> None:
+        request_id = id(request)
+        with self._lock:
+            if request_id in self._requests:
+                self._stream_incomplete = True
+                return
+            if len(self._requests) >= _MAX_CAPTURE_ENTRIES:
+                self._stream_incomplete = True
+                return
+        try:
+            url = request.url
+            headers = request.headers
+            body = self._request_body(request)
+            if not isinstance(url, str) or not isinstance(headers, Mapping):
+                raise CaptureError("full capture event stream is incomplete")
+            normalized_headers = self._raw_headers(headers)
+            if body is not None and not isinstance(body, bytes):
+                raise CaptureError("full capture event stream is incomplete")
+            if body is not None and len(body) > _MAX_FULL_BODY_BYTES:
+                raise CaptureError("full capture body exceeds the safe limit")
+            material_size = len(url.encode()) + self._header_bytes(normalized_headers)
+            if body is not None:
+                material_size += len(body)
+            self._reserve(material_size)
+            material = SessionRequestMaterial(url, normalized_headers, body)
+            handle = self._registry.store_value(kind="session_state", value=material)
+        except CaptureError:
+            raise
+        except Exception:
+            raise CaptureError("full capture event stream is incomplete") from None
+        with self._lock:
+            self._requests[request_id] = (material, handle)
+            self._request_order.append(request_id)
+
+    def _on_response(self, response: Any) -> None:
+        request = getattr(response, "request", None)
+        request_id = id(request)
+        with self._lock:
+            if request_id not in self._requests or request_id in self._responses:
+                self._stream_incomplete = True
+                return
+            body_method = getattr(response, "body", None)
+            if not callable(body_method):
+                self._stream_incomplete = True
+                return
+            task = asyncio.create_task(self._read_response(request_id, response))
+            self._response_tasks[request_id] = task
+
+    async def _read_response(self, request_id: int, response: Any) -> None:
+        try:
+            body = await response.body()
+            status = response.status
+            headers = response.headers
+            if (
+                not isinstance(body, bytes)
+                or not isinstance(status, int)
+                or isinstance(status, bool)
+                or not 0 <= status <= 999
+                or not isinstance(headers, Mapping)
+            ):
+                raise CaptureError("full capture event stream is incomplete")
+            if len(body) > _MAX_FULL_BODY_BYTES:
+                raise CaptureError("full capture body exceeds the safe limit")
+            normalized_headers = self._raw_headers(headers)
+            self._reserve(self._header_bytes(normalized_headers) + len(body))
+            material = SessionResponseMaterial(status, normalized_headers, body)
+            handle = self._registry.store_value(kind="session_state", value=material)
+            with self._lock:
+                self._responses[request_id] = (material, handle)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            with self._lock:
+                self._task_errors.append(exc)
+
+    @staticmethod
+    def _request_body(request: Any) -> bytes | None:
+        sentinel = object()
+        try:
+            value = getattr(request, "post_data_buffer", sentinel)
+        except Exception:
+            value = sentinel
+        if value is sentinel or value is None:
+            value = getattr(request, "post_data", None)
+            if isinstance(value, str):
+                return value.encode()
+        return cast(bytes | None, value)
+
+    @staticmethod
+    def _raw_headers(headers: Mapping[Any, Any]) -> dict[str, str]:
+        output: dict[str, str] = {}
+        for name, value in headers.items():
+            if not isinstance(name, str) or not isinstance(value, str):
+                raise CaptureError("full capture event stream is incomplete")
+            output[name] = value
+        return output
+
+    @staticmethod
+    def _header_bytes(headers: Mapping[str, str]) -> int:
+        return sum(len(name.encode()) + len(value.encode()) for name, value in headers.items())
+
+    def _reserve(self, amount: int) -> None:
+        with self._lock:
+            if self._total_bytes + amount > _MAX_FULL_SESSION_BYTES:
+                raise CaptureError("full capture session material exceeds the safe limit")
+            self._total_bytes += amount
+
+    async def _await_response_tasks(self) -> None:
+        with self._lock:
+            tasks = tuple(self._response_tasks.values())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def cancel(self) -> None:
+        with self._lock:
+            tasks = tuple(self._response_tasks.values())
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def finalize(self, context: Any) -> tuple[tuple[SessionExchange, ...], ValueHandle]:
+        await self._await_response_tasks()
+        with self._lock:
+            errors = tuple(self._task_errors)
+            incomplete = self._stream_incomplete
+            request_order = tuple(self._request_order)
+            requests = dict(self._requests)
+            responses = dict(self._responses)
+            entries = self._sanitized_entries
+            identity = self._identity
+        for error in errors:
+            if isinstance(error, CaptureError):
+                raise error
+        if incomplete or not request_order or entries is None or identity is None:
+            raise CaptureError("full capture event stream is incomplete")
+        if len(request_order) != len(entries) or len(request_order) != len(responses):
+            raise CaptureError("full capture event stream is incomplete")
+        try:
+            state = await context.storage_state()
+            if not isinstance(state, Mapping) or not all(
+                isinstance(key, str) for key in state
+            ):
+                raise CaptureError("full capture event stream is incomplete")
+            serialized_state = json.dumps(state, separators=(",", ":")).encode()
+        except Exception:
+            raise CaptureError("full capture event stream is incomplete") from None
+        if len(serialized_state) > _MAX_FULL_STATE_BYTES:
+            raise CaptureError("full capture state exceeds the safe limit")
+        self._reserve(len(serialized_state))
+        try:
+            state_handle = self._registry.store_value(kind="session_state", value=state)
+        except Exception:
+            raise CaptureError("full capture event stream is incomplete") from None
+        exchanges: list[SessionExchange] = []
+        try:
+            records = tuple(_entry_to_record(entry, identity) for entry in entries)
+        except CaptureError:
+            raise
+        for request_id, record in zip(request_order, records, strict=True):
+            request_item = requests.get(request_id)
+            response_item = responses.get(request_id)
+            if request_item is None or response_item is None:
+                raise CaptureError("full capture event stream is incomplete")
+            exchanges.append(
+                SessionExchange(record, request_item[1], response_item[1])
+            )
+        return tuple(exchanges), state_handle
+
+
 async def capture_har(
     config: CaptureConfig,
     scope_guard: ScopeGuard,
@@ -445,48 +657,18 @@ async def capture_har(
     registry: Any | None = None,
 ) -> Path:
     """Write a sanitized HAR after a session, never navigating config.target_url itself."""
-    try:
-        async_api = importlib.import_module("playwright.async_api")
-        async_playwright = async_api.async_playwright
-    except (ImportError, AttributeError) as exc:
-        raise CaptureError("Playwright unavailable. Install openbola[capture].") from exc
-
     if not isinstance(scope_guard, ScopeGuard):
         raise CaptureError("scope_guard must be a ScopeGuard")
     if config.login_recipe is not None and registry is None:
         raise CaptureError("registry is required when config.login_recipe is set")
     active_collector = collector or InMemoryEventCollector()
-    policy_failures: list[ScopeError] = []
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(
-            headless=config.headless,
-            args=["--no-proxy-server"],
-        )
-        try:
-            context = await browser.new_context(service_workers="block")
-            try:
-                await context.route("**/*", _scoped_route(scope_guard, policy_failures))
-                active_collector.attach(context)
-                if config.login_recipe is not None:
-                    page = await context.new_page()
-                    try:
-                        await _perform_login(page, config.login_recipe, registry)
-                    except (async_api.Error, LookupError) as exc:
-                        raise CaptureError(
-                            "automated login did not reach success_url_pattern"
-                        ) from exc
-                    finally:
-                        await page.close()
-                elif config.interactive_login:
-                    page = await context.new_page()
-                    await page.wait_for_event("close")
-            finally:
-                await context.close()
-        finally:
-            await browser.close()
-    entries = await active_collector.entries()
-    if policy_failures:
-        raise CaptureError("a browser request was denied by the confirmed scope")
+    entries, _ = await _run_scoped_capture(
+        config,
+        scope_guard,
+        active_collector,
+        full_collector=None,
+        registry=registry,
+    )
     output_path = _validated_output_path(config.capture_root, config.output_path)
     _write_sanitized_har(
         config.capture_root,
@@ -495,6 +677,142 @@ async def capture_har(
         max_bytes=config.max_har_bytes,
     )
     return output_path
+
+
+async def capture_session(
+    config: CaptureConfig,
+    scope_guard: ScopeGuard,
+    *,
+    registry: SessionValueStore,
+) -> InSessionCapture:
+    """Capture one scoped browser session with raw material held by handles."""
+    if not isinstance(scope_guard, ScopeGuard):
+        raise CaptureError("scope_guard must be a ScopeGuard")
+    if not isinstance(registry, SessionValueStore):
+        raise CaptureError("registry must be a SessionValueStore")
+    sanitized_collector = InMemoryEventCollector()
+    full_collector = _FullFidelityEventCollector(registry)
+    try:
+        entries, full_result = await _run_scoped_capture(
+            config,
+            scope_guard,
+            sanitized_collector,
+            full_collector=full_collector,
+            registry=registry,
+        )
+        if full_result is None:
+            raise CaptureError("full capture event stream is incomplete")
+        exchanges, state_handle = full_result
+        output_path = _validated_output_path(config.capture_root, config.output_path)
+        _write_sanitized_har(
+            config.capture_root,
+            config.output_path,
+            entries,
+            max_bytes=config.max_har_bytes,
+        )
+        return InSessionCapture(output_path, exchanges, state_handle, registry)
+    except BaseException:
+        registry.close()
+        raise
+
+
+async def _run_scoped_capture(
+    config: CaptureConfig,
+    scope_guard: ScopeGuard,
+    sanitized_collector: CaptureCollector,
+    *,
+    full_collector: _FullFidelityEventCollector | None,
+    registry: SessionValueStore | None,
+) -> tuple[list[dict[str, Any]], tuple[tuple[SessionExchange, ...], ValueHandle] | None]:
+    """Run the one routed browser session shared by both capture entrypoints."""
+    if full_collector is not None and registry is None:
+        raise CaptureError("registry is required for full capture")
+    try:
+        async_api = importlib.import_module("playwright.async_api")
+        async_playwright = async_api.async_playwright
+    except (ImportError, AttributeError) as exc:
+        raise CaptureError("Playwright unavailable. Install openbola[capture].") from exc
+
+    policy_failures: list[ScopeError] = []
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(
+                headless=config.headless,
+                args=["--no-proxy-server"],
+            )
+            try:
+                context = await browser.new_context(service_workers="block")
+                try:
+                    await context.route("**/*", _scoped_route(scope_guard, policy_failures))
+                    _attach_collectors(context, sanitized_collector, full_collector)
+                    if config.login_recipe is not None:
+                        page = await context.new_page()
+                        try:
+                            await _perform_login(page, config.login_recipe, registry)
+                        except (async_api.Error, LookupError) as exc:
+                            raise CaptureError(
+                                "automated login did not reach success_url_pattern"
+                            ) from exc
+                        finally:
+                            await page.close()
+                    elif config.interactive_login:
+                        page = await context.new_page()
+                        try:
+                            await page.wait_for_event("close")
+                        finally:
+                            await page.close()
+                    entries = await sanitized_collector.entries()
+                    if full_collector is not None:
+                        full_collector.set_sanitized_entries(entries, config.identity)
+                        await full_collector._await_response_tasks()
+                    if policy_failures:
+                        raise CaptureError("a browser request was denied by the confirmed scope")
+                    full_result = (
+                        await full_collector.finalize(context)
+                        if full_collector is not None
+                        else None
+                    )
+                finally:
+                    await context.close()
+            finally:
+                await browser.close()
+    except BaseException:
+        if full_collector is not None:
+            await full_collector.cancel()
+            assert registry is not None
+            registry.close()
+        raise
+    return entries, full_result
+
+
+def _attach_collectors(
+    context: Any,
+    sanitized_collector: CaptureCollector,
+    full_collector: _FullFidelityEventCollector | None,
+) -> None:
+    """Attach both collectors while remaining compatible with simple event doubles."""
+    if full_collector is None:
+        sanitized_collector.attach(context)
+        return
+
+    callbacks: dict[str, list[Callable[..., None]]] = {}
+
+    class CallbackContext:
+        def on(self, event: str, callback: Callable[..., None]) -> None:
+            callbacks.setdefault(event, []).append(callback)
+
+    proxy = CallbackContext()
+    sanitized_collector.attach(proxy)
+    full_collector.attach(proxy)
+    for event, handlers in callbacks.items():
+        def dispatch(
+            *args: Any,
+            _handlers: tuple[Callable[..., None], ...] = tuple(handlers),
+        ) -> None:
+            for handler in _handlers:
+                handler(*args)
+
+        context.on(event, dispatch)
 
 
 def parse_har_records(
