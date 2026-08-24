@@ -32,6 +32,12 @@ plans before it.
    contract (spec §5), isolated per-identity browser contexts, scope
    enforcement on navigation/replay, sanitized persistent traffic vs.
    memory-only replay material (spec §7 step 4, §8).
+   *Status: complete, merged to main (2026-08-24). Deferred to P8:
+   `LoginRecipe.start_url` rejects query parameters (real SSO entry points
+   often need them); `capture_har`'s `registry` param isn't hasattr-checked;
+   avoid `show_locals`-style traceback rendering anywhere in the
+   capture/login path (a resolved secret can linger in frame locals across
+   the extra-fields fill loop).*
 4. **P4 — Resource/provider inventory**. `ResourceInventory`/
    `ProviderAdapter` contracts (spec §5) plus the four required adapters:
    generic HTTP/OpenAPI/GraphQL, Supabase/PostgREST, Firebase, Hasura, each
