@@ -205,3 +205,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   routing headers, strict JSON recursion, streaming bounds, and header/secret
   encoding. Final review approved; 97 focused AI/client tests pass with Ruff
   and strict mypy. Task 4 legacy migration/acceptance is next.
+- P5 Task 4 implementation is committed as `b67c993`: legacy LiteLLM planning
+  delegates through typed contracts while preserving a deprecation shim and
+  no target execution. AI tests: 66 passed; Ruff/mypy green. Independent review
+  is pending.
