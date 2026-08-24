@@ -67,3 +67,13 @@ uv run pytest tests/test_ai_clients.py tests/test_ai.py -q
 The implementation and review hardening are committed in the current task
 commits, with the hardening follow-up recorded after the base
 `d4f0d7f feat: add scope-guarded BYOK AI clients` commit.
+
+Final review hardening is in `48d8821 fix: reject routing headers and deep
+provider JSON`; it blocks forwarding/routing and method-override headers,
+requires ASCII header names and values, and converts deeply nested JSON
+recursion failures into the same typed response error. Final focused proof:
+
+```text
+uv run pytest tests/test_ai_clients.py tests/test_ai.py -q
+96 passed
+```
