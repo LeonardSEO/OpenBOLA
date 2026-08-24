@@ -28,6 +28,7 @@ _HOME = re.compile(r"(?:^|[\s=:])(?:/Users/|/home/|C:\\\\Users\\\\|%USERPROFILE%
 _DATE = re.compile(r"\b(?:19|20)\d{2}[-/]\d{2}[-/]\d{2}(?:[T ]\d{2}:\d{2}:\d{2})?\b")
 _EPOCH = re.compile(r"\b1[5-9]\d{9}\b")
 _LONG_HEX = re.compile(r"\b[0-9a-f]{16,}\b", re.IGNORECASE)
+_RANDOM_HANDLE = re.compile(r"(?i)\b(?:run|session|request)[-_][A-Za-z0-9]{8,}\b")
 _RAW_ID = re.compile(
     r"(?i)\b(?:raw[ _-]*)?(?:object|record|run)[ _-]*id\s*[:=]\s*(?!\$\{)[A-Za-z0-9_-]+"
 )
@@ -51,6 +52,7 @@ def _safe_text(value: str) -> None:
         or _DATE.search(value)
         or _EPOCH.search(value)
         or _LONG_HEX.search(value)
+        or _RANDOM_HANDLE.search(value)
         or _RAW_ID.search(value)
     ):
         _fail()
