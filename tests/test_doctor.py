@@ -163,6 +163,37 @@ def test_data_root_requires_private_leaf_mode(tmp_path: Path) -> None:
     assert root.code == "data_root_not_private"
 
 
+def test_state_parent_wrong_type_or_writable_is_blocked(tmp_path: Path) -> None:
+    parent_file = tmp_path / "parent-file"
+    parent_file.write_text("not a directory", encoding="utf-8")
+    report = run_doctor(
+        data_root_path=tmp_path,
+        db_path=parent_file / "state.db",
+        browser_probe=lambda: True,
+        vault_probe=lambda: True,
+        recovery_gate=_Recovery("clear"),
+        platform="darwin",
+    )
+    state = next(item for item in report.diagnostics if item.name == "state")
+    assert state.status == "blocked"
+    assert state.code == "state_parent_untrusted"
+
+    unsafe = tmp_path / "unsafe"
+    unsafe.mkdir()
+    os.chmod(unsafe, 0o777)  # noqa: S103 - deliberately unsafe fixture
+    report = run_doctor(
+        data_root_path=tmp_path,
+        db_path=unsafe / "state.db",
+        browser_probe=lambda: True,
+        vault_probe=lambda: True,
+        recovery_gate=_Recovery("clear"),
+        platform="darwin",
+    )
+    state = next(item for item in report.diagnostics if item.name == "state")
+    assert state.status == "blocked"
+    assert state.code == "state_parent_not_private"
+
+
 def test_default_state_probe_is_read_only_and_checks_schema(tmp_path: Path) -> None:
     db_path = tmp_path / "state.db"
     StateStore(db_path)

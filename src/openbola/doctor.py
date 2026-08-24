@@ -61,6 +61,8 @@ _PROBE_CODES = frozenset(
         "state_path_unavailable",
         "state_symlink",
         "state_parent_symlink",
+        "state_parent_untrusted",
+        "state_parent_not_private",
         "state_missing",
         "state_not_regular",
         "state_not_private",
@@ -364,11 +366,23 @@ def _default_state_probe(path: Path | None) -> _ProbeResult:
         return _result("warning", "state_path_unavailable")
     try:
         absolute = path.absolute()
+        try:
+            parent_metadata = os.lstat(absolute.parent)
+        except FileNotFoundError:
+            return _result("warning", "state_missing")
+        except NotADirectoryError:
+            return _result("blocked", "state_parent_untrusted")
+        if stat.S_ISLNK(parent_metadata.st_mode):
+            return _result("blocked", "state_parent_symlink")
+        if not stat.S_ISDIR(parent_metadata.st_mode):
+            return _result("blocked", "state_parent_untrusted")
         parent_exists, parent_symlink = _safe_path_components(absolute.parent)
         if parent_symlink:
             return _result("blocked", "state_parent_symlink")
         if not parent_exists:
             return _result("warning", "state_missing")
+        if parent_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return _result("blocked", "state_parent_not_private")
         metadata = os.lstat(absolute)
         uid = getattr(os, "getuid", lambda: metadata.st_uid)()
         if stat.S_ISLNK(metadata.st_mode):
