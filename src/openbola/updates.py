@@ -14,9 +14,12 @@ import json
 import os
 import platform as _platform
 import re
+import shutil
 import stat
 import sys
+import tarfile
 import tempfile
+import zipfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -44,6 +47,7 @@ CACHE_FILENAME: Final = "update-check.json"
 MAX_RELEASE_BYTES: Final = 1_048_576
 MAX_CHECKSUM_BYTES: Final = 1_048_576
 MAX_ARTIFACT_BYTES: Final = 256 * 1024 * 1024
+MAX_EXTRACTED_BYTES: Final = 256 * 1024 * 1024
 CACHE_TTL: Final = timedelta(hours=24)
 HTTP_TIMEOUT: Final = 15.0
 USER_AGENT: Final = "OpenBOLA/0.1 (+https://github.com/LeonardSEO/openbola)"
@@ -55,8 +59,52 @@ _SEMVER_RE: Final = re.compile(
 )
 _SHA256_RE: Final = re.compile(r"^[0-9a-fA-F]{64}$")
 _REASON_RE: Final = re.compile(r"^[a-z0-9_]{1,64}$")
-_RELEASE_KEYS: Final = frozenset({"tag_name", "assets"})
-_ASSET_KEYS: Final = frozenset({"name", "browser_download_url", "size"})
+_RELEASE_KEYS: Final = frozenset(
+    {
+        "url",
+        "assets_url",
+        "upload_url",
+        "html_url",
+        "id",
+        "author",
+        "node_id",
+        "tag_name",
+        "target_commitish",
+        "name",
+        "draft",
+        "immutable",
+        "prerelease",
+        "created_at",
+        "updated_at",
+        "published_at",
+        "assets",
+        "tarball_url",
+        "zipball_url",
+        "body",
+        "mentions",
+        "discussion_url",
+        "generate_release_notes",
+    }
+)
+_REQUIRED_RELEASE_KEYS: Final = frozenset({"tag_name", "assets"})
+_ASSET_KEYS: Final = frozenset(
+    {
+        "url",
+        "id",
+        "node_id",
+        "name",
+        "label",
+        "uploader",
+        "content_type",
+        "state",
+        "size",
+        "download_count",
+        "created_at",
+        "updated_at",
+        "browser_download_url",
+    }
+)
+_REQUIRED_ASSET_KEYS: Final = frozenset({"name", "browser_download_url", "size"})
 
 
 @dataclass(frozen=True)
@@ -118,7 +166,7 @@ def _parse_json(data: bytes, *, max_bytes: int) -> object:
             object_pairs_hook=_duplicate_free_pairs,
             parse_constant=_reject_constant,
         )
-    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+    except (RecursionError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
         raise UpdateError("malformed_release") from error
     _check_json_shape(parsed, depth=0)
     return parsed
@@ -300,7 +348,9 @@ def _json_size(mapping: Mapping[str, object]) -> int:
 def _parse_release(payload: object, *, target: Platform, current_version: str) -> _Release:
     if not isinstance(payload, dict):
         raise UpdateError("malformed_release")
-    if frozenset(payload) != _RELEASE_KEYS:
+    if not frozenset(payload).issubset(_RELEASE_KEYS) or not _REQUIRED_RELEASE_KEYS.issubset(
+        payload
+    ):
         raise UpdateError("malformed_release")
     tag = _json_string(payload, "tag_name")
     version = normalize_version(tag)
@@ -314,7 +364,7 @@ def _parse_release(payload: object, *, target: Platform, current_version: str) -
     for item in assets_value:
         if not isinstance(item, dict):
             raise UpdateError("malformed_release")
-        if frozenset(item) != _ASSET_KEYS:
+        if not frozenset(item).issubset(_ASSET_KEYS) or not _REQUIRED_ASSET_KEYS.issubset(item):
             raise UpdateError("malformed_release")
         name_value = item.get("name")
         if not isinstance(name_value, str) or not name_value or name_value in seen_names:
@@ -378,14 +428,18 @@ def _parse_checksum(data: bytes, *, filename: str) -> str:
 def _scoped_url(scope_guard: ScopeGuard | None, url: str) -> str:
     """Return the canonical URL only after a concrete scope decision."""
 
-    if not isinstance(scope_guard, ScopeGuard):
+    if type(scope_guard) is not ScopeGuard:
         raise UpdateError("scope_required")
     try:
         decision = scope_guard.require_allowed(url, "GET")
     except ScopeError as error:
         raise UpdateError("scope_denied") from error
-    if not isinstance(decision, ScopeDecision):
+    if type(decision) is not ScopeDecision:
         raise UpdateError("scope_denied")
+    if decision.connect_ips:
+        # The updater has no transport adapter that can enforce a resolved
+        # peer set.  Never silently downgrade a pinned scope to hostname-only.
+        raise UpdateError("scope_peer_pinning_unsupported")
     return decision.canonical_url
 
 
@@ -626,6 +680,92 @@ def _remove_temporary(path: Path | None) -> None:
         return
 
 
+def _archive_members(target: Platform) -> tuple[str, ...]:
+    executable = "openbola.exe" if target == "windows-x64" else "openbola"
+    installer = "install.ps1" if target == "windows-x64" else "install.sh"
+    return (executable, installer, "openbola.sha256", "LICENSE", "README.md")
+
+
+def _safe_member_name(name: str) -> bool:
+    path = Path(name)
+    return (
+        bool(name)
+        and "\\" not in name
+        and not path.is_absolute()
+        and all(part not in {"", ".", ".."} for part in path.parts)
+        and len(name) <= 256
+    )
+
+
+def _extract_verified_archive(
+    archive: Path,
+    *,
+    target: Platform,
+    directory: Path,
+) -> tuple[Path, Path]:
+    """Extract one P10 archive after validating members and its executable manifest."""
+
+    expected_members = set(_archive_members(target))
+    extraction = Path(tempfile.mkdtemp(prefix=".openbola-extract-", dir=directory))
+    total = 0
+    try:
+        names: list[str]
+        if target == "windows-x64":
+            with zipfile.ZipFile(archive, "r") as bundle:
+                infos = bundle.infolist()
+                names = [info.filename for info in infos]
+                if len(names) != len(set(names)) or set(names) != expected_members:
+                    raise UpdateError("archive_members_invalid")
+                for info in infos:
+                    if not _safe_member_name(info.filename) or info.is_dir():
+                        raise UpdateError("archive_members_invalid")
+                    mode = (info.external_attr >> 16) & 0o170000
+                    if mode == stat.S_IFLNK or info.file_size > MAX_EXTRACTED_BYTES:
+                        raise UpdateError("archive_members_invalid")
+                    total += info.file_size
+                    if total > MAX_EXTRACTED_BYTES:
+                        raise UpdateError("archive_too_large")
+                    destination = extraction / info.filename
+                    with bundle.open(info, "r") as source, destination.open("xb") as output:
+                        shutil.copyfileobj(source, output, length=64 * 1024)
+        else:
+            with tarfile.open(archive, mode="r:gz") as bundle:
+                members = bundle.getmembers()
+                names = [member.name for member in members]
+                if len(names) != len(set(names)) or set(names) != expected_members:
+                    raise UpdateError("archive_members_invalid")
+                for member in members:
+                    if (
+                        not _safe_member_name(member.name)
+                        or not member.isreg()
+                        or member.size > MAX_EXTRACTED_BYTES
+                    ):
+                        raise UpdateError("archive_members_invalid")
+                    total += member.size
+                    if total > MAX_EXTRACTED_BYTES:
+                        raise UpdateError("archive_too_large")
+                    tar_source = bundle.extractfile(member)
+                    if tar_source is None:
+                        raise UpdateError("archive_members_invalid")
+                    destination = extraction / member.name
+                    with tar_source, destination.open("xb") as output:
+                        shutil.copyfileobj(tar_source, output, length=64 * 1024)
+        executable_name = "openbola.exe" if target == "windows-x64" else "openbola"
+        manifest = extraction / "openbola.sha256"
+        expected_digest = _parse_checksum(manifest.read_bytes(), filename=executable_name)
+        executable = extraction / executable_name
+        if executable.is_symlink() or not executable.is_file():
+            raise UpdateError("archive_members_invalid")
+        digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+        if digest.casefold() != expected_digest.casefold():
+            raise UpdateError("manifest_mismatch")
+        return extraction, executable
+    except UpdateError:
+        shutil.rmtree(extraction, ignore_errors=True)
+        raise
+    except (OSError, tarfile.TarError, zipfile.BadZipFile, ValueError) as error:
+        shutil.rmtree(extraction, ignore_errors=True)
+        raise UpdateError("archive_invalid") from error
 def _replace_from_temp(temporary: Path, executable: Path) -> None:
     try:
         mode = stat.S_IMODE(executable.stat().st_mode)
@@ -680,6 +820,7 @@ class UpdateService:
         return httpx.Client(
             transport=self.transport,
             follow_redirects=False,
+            trust_env=False,
             timeout=HTTP_TIMEOUT,
             headers={"accept": "application/json", "user-agent": USER_AGENT},
         )
@@ -724,8 +865,11 @@ class UpdateService:
             return UpdateResult("unavailable", self.current_version, None, error.code)
 
     def check(self, *, force_check: bool = False) -> UpdateResult:
-        now = self.clock().astimezone(UTC)
-        root = self._root()
+        try:
+            now = self.clock().astimezone(UTC)
+            root = self._root()
+        except UpdateError as error:
+            return UpdateResult("unavailable", self.current_version, None, error.code)
         if not force_check:
             cached = _read_cache(root, current_version=self.current_version, now=now)
             if cached is not None:
@@ -770,7 +914,7 @@ class UpdateService:
                     ),
                     release.checksums_url,
                 )
-                temporary, digest, _ = _download_to_temp(
+                archive, digest, _ = _download_to_temp(
                     client,
                     _scoped_url(self.scope_guard, release.artifact.download_url),
                     directory=executable.parent,
@@ -778,13 +922,23 @@ class UpdateService:
                     scope_guard=self.scope_guard,
                 )
             if digest.casefold() != release.artifact.sha256.casefold():
-                _remove_temporary(temporary)
+                _remove_temporary(archive)
                 return UpdateResult(
                     "unavailable",
                     self.current_version,
                     release.version,
                     "digest_mismatch",
                 )
+            try:
+                extraction, replacement = _extract_verified_archive(
+                    archive,
+                    target=target,
+                    directory=executable.parent,
+                )
+            except UpdateError:
+                _remove_temporary(archive)
+                raise
+            _remove_temporary(archive)
             approved = confirm
             if not approved and self.confirmation is not None:
                 try:
@@ -792,15 +946,16 @@ class UpdateService:
                 except Exception:
                     approved = False
             if not approved:
-                _remove_temporary(temporary)
+                shutil.rmtree(extraction, ignore_errors=True)
                 return UpdateResult(
                     "denied", self.current_version, release.version, "confirmation_required"
                 )
             try:
-                _replace_from_temp(temporary, executable)
+                _replace_from_temp(replacement, executable)
             except UpdateError:
-                _remove_temporary(temporary)
+                shutil.rmtree(extraction, ignore_errors=True)
                 raise
+            shutil.rmtree(extraction, ignore_errors=True)
             result = UpdateResult("updated", self.current_version, release.version)
             _write_cache(root, result, now=self.clock().astimezone(UTC))
             return result

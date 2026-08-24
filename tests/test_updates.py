@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
+import tarfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -26,9 +28,36 @@ from openbola.updates import (
 
 CURRENT = "0.1.0"
 CANDIDATE = "0.1.1"
-ARTIFACT = b"openbola-native-test-executable"
-ARTIFACT_DIGEST = hashlib.sha256(ARTIFACT).hexdigest()
+EXECUTABLE = b"openbola-native-test-executable"
 ARTIFACT_NAME = artifact_name(CANDIDATE, "macos-arm64")
+
+
+def _archive(version: str, *, overrides: dict[str, bytes] | None = None) -> bytes:
+    executable_name = "openbola"
+    executable_digest = hashlib.sha256(EXECUTABLE).hexdigest()
+    manifest = f"{executable_digest}  {executable_name}\n".encode()
+    members = {
+        executable_name: EXECUTABLE,
+        "install.sh": b"#!/bin/sh\n",
+        "openbola.sha256": manifest,
+        "LICENSE": b"Apache-2.0\n",
+        "README.md": b"OpenBOLA\n",
+    }
+    if overrides:
+        members.update(overrides)
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w:gz") as bundle:
+        for name, content in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            info.mode = 0o755 if name == executable_name else 0o644
+            info.mtime = 0
+            bundle.addfile(info, io.BytesIO(content))
+    return stream.getvalue()
+
+
+ARTIFACT = _archive(CANDIDATE)
+ARTIFACT_DIGEST = hashlib.sha256(ARTIFACT).hexdigest()
 CHECKSUMS = f"{ARTIFACT_DIGEST}  {ARTIFACT_NAME}\n".encode()
 
 
@@ -47,7 +76,9 @@ def _release_payload(
         + "/"
         + release_artifact_name
     )
-    release_checksums = f"{ARTIFACT_DIGEST}  {release_artifact_name}\n".encode()
+    release_checksums = (
+        f"{hashlib.sha256(_archive(version)).hexdigest()}  {release_artifact_name}\n".encode()
+    )
     assets: list[dict[str, object]] = [
         {
             "name": release_artifact_name,
@@ -347,7 +378,7 @@ def test_yes_replaces_atomically_and_preserves_executable_mode(tmp_path: Path) -
     )
     assert result.status == "updated"
     assert result.candidate_version == CANDIDATE
-    assert executable.read_bytes() == ARTIFACT
+    assert executable.read_bytes() == EXECUTABLE
     assert os.stat(executable).st_mode & 0o777 == 0o751
     assert calls[0] == GITHUB_API_RELEASE_URL
     assert calls[-1].endswith(ARTIFACT_NAME)
@@ -555,3 +586,39 @@ def test_future_or_inconsistent_cache_is_ignored(tmp_path: Path) -> None:
     )
     assert service.check().status == "available"
     assert calls == [GITHUB_API_RELEASE_URL]
+
+
+@pytest.mark.parametrize(
+    ("artifact", "reason"),
+    [
+        (
+            _archive(CANDIDATE, overrides={"unexpected.txt": b"RAW_ID_SENTINEL"}),
+            "archive_members_invalid",
+        ),
+        (_archive(CANDIDATE, overrides={"../evil": b"PATH_SENTINEL"}), "archive_members_invalid"),
+        (_archive(CANDIDATE, overrides={"openbola": b"tampered executable"}), "manifest_mismatch"),
+        (b"not-an-archive", "archive_invalid"),
+    ],
+)
+def test_archive_members_and_adjacent_manifest_are_verified_before_replace(
+    tmp_path: Path,
+    artifact: bytes,
+    reason: str,
+) -> None:
+    executable = _executable(tmp_path)
+    payload = _release_payload(size=len(artifact))
+    checksum = f"{hashlib.sha256(artifact).hexdigest()}  {ARTIFACT_NAME}\n".encode()
+    transport, _ = _transport(payload, artifact=artifact, checksums=checksum)
+    before = executable.read_bytes()
+    result = apply_update(
+        confirm=True,
+        current_version=CURRENT,
+        data_root=tmp_path / "state",
+        executable=executable,
+        transport=transport,
+        scope_guard=_scope_guard(tmp_path),
+        system="darwin",
+        machine="arm64",
+    )
+    assert result.reason_code == reason
+    assert executable.read_bytes() == before
