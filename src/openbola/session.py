@@ -104,7 +104,11 @@ class TargetSummary:
     def __post_init__(self) -> None:
         if type(self.origin) is not str or not self.origin or len(self.origin) > 255:
             raise ValueError("target origin is invalid")
-        if not re.fullmatch(r"https?://[^/?#]+", self.origin):
+        try:
+            normalized = _normalize_origin(self.origin)
+        except SessionError:
+            raise ValueError("target origin is invalid") from None
+        if normalized != self.origin:
             raise ValueError("target origin is invalid")
         for value, label in (
             (self.scope_digest, "scope digest"),
@@ -585,7 +589,9 @@ class AssessmentSession:
             if type(status.reason_code) is str and status.reason_code in _SAFE_REASON_CODES
             else None
         )
-        return RecoveryStatus(status.state, bool(status.journal_present), reason)
+        if type(status.journal_present) is not bool:
+            return RecoveryStatus("blocked", True, "recovery_blocked")
+        return RecoveryStatus(status.state, status.journal_present, reason)
 
 
 def _require_bounded_text(value: object, label: str, limit: int) -> None:
@@ -606,7 +612,8 @@ def _normalize_origin(value: str) -> str:
             raise ValueError
         hostname = parsed.hostname
         if hostname is None or any(
-            ord(character) < 0x21 or ord(character) > 0x7E for character in value
+            character.isspace() or ord(character) < 0x21 or ord(character) > 0x7E
+            for character in value
         ):
             raise ValueError
         port = parsed.port
