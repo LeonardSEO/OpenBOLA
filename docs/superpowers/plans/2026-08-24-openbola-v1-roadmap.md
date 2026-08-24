@@ -73,8 +73,42 @@ plans before it.
      into `endpoint_template`/`resource_name` verbatim — pre-existing in
      `endpoints.templatize`, same leak class as the JSON-key issue just
      fixed, tracked together for a future `endpoints.py` pass.
-   - **P4b/P4c/P4d** — Supabase/PostgREST, Firebase, Hasura adapters,
-     written just-in-time now that P4a's contract has landed.
+   - **P4b** — Supabase/PostgREST adapter (`SupabaseAdapter`). *Status:
+     complete, merged to main (2026-08-24).* PostgREST embeds record IDs
+     only in query-string `eq.` filters, never the path, so this adapter
+     reads `?id=eq.<value>` rather than reusing `GenericAdapter`'s
+     path-based extraction. Promoted `discovery.py`'s JSON-key-routing
+     helpers (`top_level_json_keys`/`classify_key`) from private to
+     public so P4c/P4d can reuse them too. Final review (opus) surfaced
+     and fixed before merge: `provider_confidence` was computed once
+     globally instead of per `(origin, table)` group, letting one
+     tenant's confirmed-provider evidence bleed onto an unrelated
+     tenant's inventory (same leak class P4a's own final review closed
+     for `GenericAdapter`, recurring — worth treating "confidence/fields
+     must never cross origins" as a standing invariant for every future
+     adapter, not a one-off fix); `eq.` filter extraction minted a
+     `record_id` handle for any opaque-ID-shaped value regardless of the
+     filter's parameter name, so `?secret_token=eq.sk_live_...` would
+     have treated a live secret as a probeable record ID — fixed by
+     reusing `endpoints.py`'s existing `_is_sensitive_field` guard (a
+     private helper, imported directly rather than promoted, since only
+     one call site needed it); RPC calls (`POST /rest/v1/rpc/<fn>`) all
+     collapsed into one `"rpc"` pseudo-table regardless of function name,
+     unioning different (possibly differently-privileged) functions'
+     field surfaces — fixed so each function gets its own inventory with
+     a real, callable `endpoint_template`. Deferred to later plans:
+     `_is_rest_path` is a substring match, not a path-segment-boundary
+     match, so a gateway-proxied static-asset path containing
+     `/rest/v1/` literally would be misread as a table (defensible
+     leniency for reverse-proxied deployments, but worth tightening once
+     P4c/P4d reveal more real-world path shapes); `urlsplit()` runs twice
+     per record in `inventory()` (perf only); `urlsplit` can raise on a
+     malformed URL — shared, pre-existing exposure with `GenericAdapter`,
+     tracked for a future hardening pass since captured traffic is
+     well-formed by construction.
+   - **P4c/P4d** — Firebase, Hasura adapters, written just-in-time now
+     that P4a/P4b's contracts and the origin/tenant-isolation and
+     sensitive-field-guard precedents have landed.
 
    Ruling: every `RequestRecord` this codebase produces today (from both
    `capture.py`'s live collector and its HAR parser) already has its body
