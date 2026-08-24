@@ -65,11 +65,19 @@ def test_parse_rejects_malformed_argument_and_directive_grammar() -> None:
         "where",
         "where:: 1",
         "where: foo bar",
-        "where: 1,",
+        "where: 1,,",
     )
     for argument in malformed:
         assert _parse_operation(f"query {{ orders({argument}) {{ id }} }}") is None
     assert _parse_operation("query { orders @skip(if: ) { id } }") is None
+
+
+def test_parse_accepts_variable_definition_types_defaults_and_trailing_commas() -> None:
+    parsed = _parse_operation(
+        'query Q($ids: [uuid!]!, $id: uuid = "fallback",) '
+        "{ orders(ids: $ids, id: $id,) { id } }"
+    )
+    assert parsed is not None
 
 
 def test_parse_fails_closed_before_python_recursion_limit() -> None:

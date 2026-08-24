@@ -188,7 +188,10 @@ def _parse_value(tokens: tuple[_Token, ...], index: int, depth: int = 0) -> int 
             if _is(tokens, cursor, "punctuation", closing):
                 return None
         if _is(tokens, cursor, "punctuation", closing):
-            return cursor + 1
+            cursor += 1
+            if token.value == "[" and _is(tokens, cursor, "punctuation", "!"):
+                cursor += 1
+            return cursor
         # Commas are optional in GraphQL, so adjacent values/object fields are
         # accepted when the next token starts another value or object field.
     return None
@@ -201,6 +204,7 @@ def _validate_argument_tokens(tokens: tuple[_Token, ...]) -> bool:
     while cursor < len(tokens):
         if not _is(tokens, cursor, "name") and not _is(tokens, cursor, "variable"):
             return False
+        key_kind = tokens[cursor].kind
         cursor += 1
         if not _is(tokens, cursor, "punctuation", ":"):
             return False
@@ -209,12 +213,18 @@ def _validate_argument_tokens(tokens: tuple[_Token, ...]) -> bool:
         if value_end is None:
             return False
         cursor = value_end
+        if key_kind == "variable" and _is(tokens, cursor, "punctuation", "="):
+            cursor += 1
+            default_end = _parse_value(tokens, cursor)
+            if default_end is None:
+                return False
+            cursor = default_end
         if cursor == len(tokens):
             return True
         if _is(tokens, cursor, "punctuation", ","):
             cursor += 1
             if cursor == len(tokens):
-                return False
+                return True
     return cursor == len(tokens)
 
 

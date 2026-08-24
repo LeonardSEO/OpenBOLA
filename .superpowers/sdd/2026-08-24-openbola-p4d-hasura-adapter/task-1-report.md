@@ -47,3 +47,12 @@
 - Added a selection-depth budget so deeply nested documents fail closed instead of
   reaching Python recursion limits.
 - Revalidated parser tests (7 passed), Ruff, and strict mypy.
+
+## Review fix 3
+
+- Extended the argument validator for GraphQL variable-definition type lists,
+  non-null markers, defaults, and insignificant trailing commas while continuing
+  to reject malformed double commas and missing values.
+- Added regression coverage for typed/defaulted variable definitions and trailing
+  commas.
+- Revalidated parser tests (8 passed), Ruff, and strict mypy.
