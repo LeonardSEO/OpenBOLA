@@ -965,34 +965,28 @@ def generate_csv_report(bundle: ReportBundle) -> str:
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\n")
     writer.writerow(_CSV_HEADER)
-    for resource in sorted(bundle.resources, key=_resource_key):
-        fields = tuple(_resource_document(resource)["fields"])
+    resources = cast(list[dict[str, Any]], document["resources"])
+    for resource in resources:
+        fields = tuple(cast(list[dict[str, str]], resource["fields"]))
         field_names = ";".join(item["name"] for item in fields)
         field_types = ";".join(item["type"] for item in fields)
-        resource_document = next(
-            item
-            for item in cast(list[dict[str, Any]], document["resources"])
-            if item["provider"] == resource.provider
-            and item["dataset"] == resource.dataset
-            and item["endpoint_template"] == resource.endpoint_template
-        )
-        for capability in resource.capabilities:
+        for capability in cast(list[dict[str, Any]], resource["capabilities"]):
             row = (
-                resource_document["provider"],
-                resource_document["confidence"],
-                resource_document["dataset"],
-                resource_document["endpoint_template"],
-                resource_document["total_discovered"],
+                resource["provider"],
+                resource["confidence"],
+                resource["dataset"],
+                resource["endpoint_template"],
+                resource["total_discovered"],
                 field_names,
                 field_types,
-                capability.capability,
-                capability.status,
-                capability.owner_identity_ref or "",
-                capability.attacker_identity_ref or "",
-                capability.owner_status or "",
-                capability.attacker_status or "",
-                capability.cleanup,
-                capability.coverage,
+                capability["capability"],
+                capability["status"],
+                capability["owner_identity_ref"] or "",
+                capability["attacker_identity_ref"] or "",
+                capability["owner_status"] or "",
+                capability["attacker_status"] or "",
+                capability["cleanup"],
+                capability["coverage"],
             )
             writer.writerow(row)
     return output.getvalue()
