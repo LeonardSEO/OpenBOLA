@@ -23,7 +23,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeVar
+from typing import Any, Literal, NoReturn, Protocol, TypeVar, cast
 from urllib.parse import quote
 
 from openbola.models import Finding, ProbeResult, Verdict
@@ -103,6 +103,40 @@ _LEGACY_SENSITIVE_KEYS = frozenset(
         "token",
     }
 )
+_LEGACY_CAPABILITY_LIMITATION = (
+    "Legacy evidence omitted capability proof; mutation lifecycle claims are not inferred."
+)
+
+
+def _raise_report_finding_type(value: object) -> NoReturn:
+    raise TypeError("report findings must contain ReportFinding or Finding values")
+
+
+def _report_finding_from_legacy(finding: Finding) -> ReportFinding:
+    """Adapt one persisted finding at the report boundary.
+
+    The legacy row is consumed immediately and only its validated, opaque
+    projection enters the typed report contract.  In particular, the source
+    evidence mapping is never retained on the resulting value.
+    """
+
+    if not isinstance(finding, Finding):
+        return _raise_report_finding_type(finding)
+    endpoint = _safe_endpoint_template(finding.endpoint_template)
+    method = _safe_method(finding.method)
+    severity = _finding_severity(finding)
+    return ReportFinding(
+        endpoint_template=endpoint,
+        method=method,
+        severity=severity,
+        title=_typed_text(finding.title, field_name="finding title"),
+        description=_typed_text(finding.description, field_name="finding description"),
+        evidence=FindingEvidence.from_legacy_mapping(
+            finding.evidence,
+            method=method,
+            endpoint_template=endpoint,
+        ),
+    )
 
 
 def _typed_text(value: str, *, field_name: str) -> str:
@@ -447,7 +481,6 @@ class ReportFinding:
             self, "description", _typed_text(self.description, field_name="finding description")
         )
 
-
 class FindingStore(Protocol):
     """The narrow StateStore read contract used by report construction."""
 
@@ -531,17 +564,27 @@ class RunSummary:
 class ReportBundle:
     """The complete, safe input shared by every rendered report format."""
 
-    findings: Sequence[Finding]
+    findings: Sequence[ReportFinding]
     outcomes: Sequence[ProbeResult]
     scope_target_label: str
     authorization_reference: str = field(repr=False)
     summary: RunSummary | None = None
     limitations: Sequence[str] = _DEFAULT_LIMITATIONS
+    resources: Sequence[ResourceReport] = ()
 
     def __post_init__(self) -> None:
-        findings = tuple(self.findings)
+        raw_findings = tuple(self.findings)
+        findings: tuple[ReportFinding, ...] = tuple(
+            item
+            if isinstance(item, ReportFinding)
+            else _report_finding_from_legacy(item)
+            if isinstance(item, Finding)
+            else _raise_report_finding_type(item)
+            for item in raw_findings
+        )
         outcomes = tuple(self.outcomes)
         limitations = tuple(self.limitations)
+        resources = tuple(self.resources)
         if not isinstance(self.scope_target_label, str) or not self.scope_target_label.strip():
             raise ValueError("scope target label must be a non-empty string")
         if (
@@ -551,6 +594,15 @@ class ReportBundle:
             raise ValueError("authorization reference must be a non-empty string")
         if any(not isinstance(item, str) or not item.strip() for item in limitations):
             raise ValueError("report limitations must be non-empty strings")
+        if any(not isinstance(item, ResourceReport) for item in resources):
+            raise TypeError("report resources must contain ResourceReport values")
+        resources = tuple(sorted(resources, key=_resource_key))
+        if resources and len(set(resources)) != len(resources):
+            raise ValueError("report resources must be unique")
+        if any(isinstance(item, Finding) for item in raw_findings) and (
+            _LEGACY_CAPABILITY_LIMITATION not in limitations
+        ):
+            limitations = tuple(limitations) + (_LEGACY_CAPABILITY_LIMITATION,)
 
         derived = RunSummary.from_outcomes(outcomes)
         summary = self.summary or derived
@@ -572,6 +624,7 @@ class ReportBundle:
         object.__setattr__(self, "outcomes", outcomes)
         object.__setattr__(self, "limitations", limitations)
         object.__setattr__(self, "summary", summary)
+        object.__setattr__(self, "resources", resources)
 
     @property
     def authorization_reference_fingerprint(self) -> str:
@@ -585,17 +638,18 @@ class ReportBundle:
     def from_outcomes(
         cls,
         *,
-        findings: Sequence[Finding],
+        findings: Sequence[Finding | ReportFinding],
         outcomes: Sequence[ProbeResult],
         scope_target_label: str,
         authorization_reference: str,
         total_combinations: int | None = None,
         limitations: Sequence[str] = _DEFAULT_LIMITATIONS,
+        resources: Sequence[ResourceReport] = (),
     ) -> ReportBundle:
         """Construct a bundle and derive its counts from the supplied outcomes."""
 
         return cls(
-            findings=findings,
+            findings=cast(Sequence[ReportFinding], findings),
             outcomes=outcomes,
             scope_target_label=scope_target_label,
             authorization_reference=authorization_reference,
@@ -603,6 +657,31 @@ class ReportBundle:
                 outcomes, total_combinations=total_combinations
             ),
             limitations=limitations,
+            resources=resources,
+        )
+
+    @classmethod
+    def from_legacy_findings(
+        cls,
+        *,
+        findings: Sequence[Finding],
+        outcomes: Sequence[ProbeResult] = (),
+        scope_target_label: str,
+        authorization_reference: str,
+        total_combinations: int | None = None,
+        limitations: Sequence[str] = _DEFAULT_LIMITATIONS,
+        resources: Sequence[ResourceReport] = (),
+    ) -> ReportBundle:
+        """Adapt persisted ``Finding`` rows exactly once at the report boundary."""
+
+        return cls.from_outcomes(
+            findings=findings,
+            outcomes=outcomes,
+            scope_target_label=scope_target_label,
+            authorization_reference=authorization_reference,
+            total_combinations=total_combinations,
+            limitations=limitations,
+            resources=resources,
         )
 
     @classmethod
@@ -615,6 +694,7 @@ class ReportBundle:
         authorization_reference: str,
         total_combinations: int | None = None,
         limitations: Sequence[str] = _DEFAULT_LIMITATIONS,
+        resources: Sequence[ResourceReport] = (),
     ) -> ReportBundle:
         """Read persisted findings through the StateStore's credential-safe API."""
 
@@ -625,10 +705,11 @@ class ReportBundle:
             authorization_reference=authorization_reference,
             total_combinations=total_combinations,
             limitations=limitations,
+            resources=resources,
         )
 
 
-def serialize_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
+def serialize_evidence(evidence: Mapping[str, Any] | FindingEvidence) -> dict[str, Any]:
     """Return a minimal allowlisted evidence document suitable for reports.
 
     Sensitive containers are discarded without carrying their key names into a
@@ -636,6 +717,22 @@ def serialize_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
     new executor field cannot accidentally become a credential disclosure.
     """
 
+    if isinstance(evidence, FindingEvidence):
+        # Compatibility projection for the pre-P7 renderers.  The canonical
+        # typed document uses ``_typed_evidence_document`` instead; this view
+        # intentionally exposes only the old bounded read-proof fields.
+        proof = next(iter(evidence.capabilities), None)
+        safe_typed: dict[str, Any] = {}
+        if evidence.object_ref is not None:
+            safe_typed["object_ref"] = evidence.object_ref
+        if proof is not None:
+            if proof.owner_status is not None:
+                safe_typed["owner_status"] = proof.owner_status
+            if proof.attacker_status is not None:
+                safe_typed["attacker_status"] = proof.attacker_status
+            if proof.comparison is not None:
+                safe_typed["comparison"] = proof.comparison
+        return {key: safe_typed[key] for key in sorted(safe_typed)}
     if not isinstance(evidence, Mapping):
         raise TypeError("report evidence must be a mapping")
     safe: dict[str, Any] = {}
@@ -937,6 +1034,111 @@ def _report_document(bundle: ReportBundle) -> dict[str, Any]:
     }
 
 
+def canonical_report_document(bundle: ReportBundle) -> dict[str, Any]:
+    """Return the typed, schema-versioned report document.
+
+    This is the sole generic-dictionary boundary for P7.  All findings and
+    resources have already passed the immutable typed contracts before this
+    function emits JSON-compatible values.
+    """
+
+    summary = _summary(bundle)
+    return {
+        "authorization": {"reference_fingerprint": bundle.authorization_reference_fingerprint},
+        "findings": [
+            _typed_finding_document(item) for item in _ordered_typed_findings(bundle.findings)
+        ],
+        "format": "openbola-report-v1",
+        "limitations": [_safe_display_text(item) for item in bundle.limitations],
+        "outcomes": [_outcome_document(item) for item in _ordered_outcomes(bundle.outcomes)],
+        "resources": [
+            _resource_document(item) for item in sorted(bundle.resources, key=_resource_key)
+        ],
+        "schema_version": 1,
+        "scope": {"target_label": _safe_display_text(bundle.scope_target_label)},
+        "summary": _summary_document(summary),
+    }
+
+
+def _resource_key(resource: ResourceReport) -> tuple[Any, ...]:
+    return (
+        resource.provider,
+        resource.dataset,
+        resource.endpoint_template,
+        resource.confidence,
+        resource.total_discovered,
+        tuple(_field_key(item) for item in resource.fields),
+        tuple(_capability_key(item) for item in resource.capabilities),
+    )
+
+
+def _typed_finding_document(finding: ReportFinding) -> dict[str, Any]:
+    return {
+        "description": finding.description,
+        "endpoint_template": finding.endpoint_template,
+        "evidence": _typed_evidence_document(finding.evidence),
+        "method": finding.method,
+        "severity": finding.severity,
+        "title": finding.title,
+    }
+
+
+def _typed_evidence_document(evidence: FindingEvidence) -> dict[str, Any]:
+    return {
+        "capabilities": [_capability_document(item) for item in evidence.capabilities],
+        "cleanup": evidence.cleanup,
+        "confidence": evidence.confidence,
+        "coverage": evidence.coverage,
+        "fields": [
+            {"name": item.name, "type": item.type_name} for item in evidence.fields
+        ],
+        "impacted_identity_refs": list(evidence.impacted_identity_refs),
+        "object_ref": evidence.object_ref,
+        "remediation": evidence.remediation,
+        "reproduction": list(evidence.reproduction),
+    }
+
+
+def _capability_document(proof: CapabilityProof) -> dict[str, Any]:
+    return {
+        "attacker_identity_ref": proof.attacker_identity_ref,
+        "attacker_status": proof.attacker_status,
+        "capability": proof.capability,
+        "cleanup": proof.cleanup,
+        "comparison": proof.comparison,
+        "coverage": proof.coverage,
+        "owner_identity_ref": proof.owner_identity_ref,
+        "owner_status": proof.owner_status,
+        "status": proof.status,
+    }
+
+
+def _resource_document(resource: ResourceReport) -> dict[str, Any]:
+    return {
+        "capabilities": [_capability_document(item) for item in resource.capabilities],
+        "confidence": resource.confidence,
+        "dataset": resource.dataset,
+        "endpoint_template": resource.endpoint_template,
+        "fields": [{"name": item.name, "type": item.type_name} for item in resource.fields],
+        "provider": resource.provider,
+        "total_discovered": resource.total_discovered,
+    }
+
+
+def _ordered_typed_findings(findings: Sequence[ReportFinding]) -> list[ReportFinding]:
+    return sorted(
+        findings,
+        key=lambda finding: (
+            _SEVERITY_ORDER[finding.severity],
+            finding.method,
+            finding.endpoint_template,
+            finding.title,
+            finding.description,
+            _canonical_json(_typed_evidence_document(finding.evidence)),
+        ),
+    )
+
+
 def _summary_document(summary: RunSummary) -> dict[str, Any]:
     return {
         "bola": summary.bola,
@@ -952,7 +1154,7 @@ def _summary_document(summary: RunSummary) -> dict[str, Any]:
     }
 
 
-def _finding_document(finding: Finding) -> dict[str, Any]:
+def _finding_document(finding: Finding | ReportFinding) -> dict[str, Any]:
     method, endpoint = _finding_endpoint(finding)
     return {
         "description": _safe_display_text(finding.description),
@@ -977,7 +1179,7 @@ def _outcome_document(outcome: ProbeResult) -> dict[str, Any]:
     }
 
 
-def _ordered_findings(findings: Sequence[Finding]) -> list[Finding]:
+def _ordered_findings(findings: Sequence[Finding | ReportFinding]) -> list[Finding | ReportFinding]:
     return sorted(
         findings,
         key=lambda finding: (
@@ -1004,15 +1206,18 @@ def _ordered_outcomes(outcomes: Sequence[ProbeResult]) -> list[ProbeResult]:
     )
 
 
-def _findings_by_endpoint(findings: Sequence[Finding]) -> dict[tuple[str, str], list[Finding]]:
-    grouped: dict[tuple[str, str], list[Finding]] = {}
+def _findings_by_endpoint(
+    findings: Sequence[Finding | ReportFinding],
+) -> dict[tuple[str, str], list[Finding | ReportFinding]]:
+    grouped: dict[tuple[str, str], list[Finding | ReportFinding]] = {}
     for finding in _ordered_findings(findings):
         grouped.setdefault(_finding_endpoint(finding), []).append(finding)
     return grouped
 
 
 def _outcome_severity(
-    outcome: ProbeResult, findings_by_endpoint: Mapping[tuple[str, str], Sequence[Finding]]
+    outcome: ProbeResult,
+    findings_by_endpoint: Mapping[tuple[str, str], Sequence[Finding | ReportFinding]],
 ) -> str | None:
     findings = findings_by_endpoint.get(_outcome_endpoint(outcome), ())
     if not findings:
@@ -1020,7 +1225,7 @@ def _outcome_severity(
     return min((_finding_severity(item) for item in findings), key=_SEVERITY_ORDER.__getitem__)
 
 
-def _finding_endpoint(finding: Finding) -> tuple[str, str]:
+def _finding_endpoint(finding: Finding | ReportFinding) -> tuple[str, str]:
     return _safe_method(finding.method), _safe_endpoint_template(finding.endpoint_template)
 
 
@@ -1031,7 +1236,7 @@ def _outcome_endpoint(outcome: ProbeResult) -> tuple[str, str]:
     )
 
 
-def _finding_severity(finding: Finding) -> str:
+def _finding_severity(finding: Finding | ReportFinding) -> str:
     if not isinstance(finding.severity, str) or finding.severity not in _SEVERITIES:
         raise ValueError("finding severity is not supported by the report format")
     return finding.severity
