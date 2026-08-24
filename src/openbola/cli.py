@@ -11,6 +11,7 @@ import typer
 from rich.console import Console
 
 from openbola import __version__
+from openbola.doctor import DiagnosticReport, run_doctor
 from openbola.mcp_server import MCPServiceError, create_mcp_server
 from openbola.pipeline import IdentityInput, PipelineError, PipelineResult, run_pipeline
 from openbola.reports import (
@@ -19,6 +20,7 @@ from openbola.reports import (
     ReportLocator,
     load_published_report,
 )
+from openbola.setup import SetupResult, run_setup
 from openbola.updates import UpdateResult, apply_update, check_for_update
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -54,6 +56,21 @@ _SAFE_UPDATE_REASONS = frozenset(
         "unsupported_platform",
         "update_failed",
         "url_denied",
+    }
+)
+_SAFE_SETUP_REASONS = frozenset(
+    {
+        "browser_install_failed",
+        "browser_self_test_failed",
+        "browser_unavailable",
+        "data_root_unavailable",
+        "data_root_untrusted",
+        "invalid_arguments",
+        "marker_write_failed",
+        "setup_marker_invalid",
+        "setup_marker_missing",
+        "setup_marker_untrusted",
+        "vault_unavailable",
     }
 )
 
@@ -105,6 +122,56 @@ def _emit_update_result(result: UpdateResult, *, json_output: bool) -> None:
     else:
         console.print("[bold red]update geweigerd[/bold red]")
     if not ok:
+        raise typer.Exit(code=2)
+
+
+def _emit_setup_result(result: SetupResult, *, json_output: bool) -> None:
+    """Render the setup protocol without exposing adapter or path details."""
+
+    details = result.public_summary()
+    reason = details.get("reason_code")
+    if reason not in _SAFE_SETUP_REASONS:
+        details.pop("reason_code", None)
+    if json_output:
+        typer.echo(json.dumps(details, sort_keys=True, separators=(",", ":")))
+    else:
+        if result.ok:
+            console.print("[green]OpenBOLA setup voltooid[/green]")
+        else:
+            console.print("[bold red]setup geweigerd[/bold red]")
+        console.print(f"  [dim]->[/dim] browser: {details['browser']}")
+        console.print(f"  [dim]->[/dim] vault: {details['vault']}")
+        console.print(f"  [dim]->[/dim] self-test: {details['self_test']}")
+    if not result.ok:
+        raise typer.Exit(code=2)
+
+
+def _emit_doctor_result(result: DiagnosticReport, *, json_output: bool) -> None:
+    """Render bounded local diagnostics and preserve blocked exit semantics."""
+
+    details = result.public_dict()
+    if json_output:
+        typer.echo(json.dumps(details, sort_keys=True, separators=(",", ":")))
+    else:
+        heading = (
+            "[green]doctor: lokale installatie gereed[/green]"
+            if result.ok
+            else "[yellow]doctor: aandacht vereist[/yellow]"
+        )
+        console.print(heading)
+        for diagnostic in result.diagnostics:
+            colour = (
+                "green"
+                if diagnostic.status == "ok"
+                else "yellow"
+                if diagnostic.status == "warning"
+                else "red"
+            )
+            console.print(
+                f"  [dim]->[/dim] [{colour}]{diagnostic.name}: {diagnostic.code}[/{colour}]"
+            )
+        console.print(f"  [dim]->[/dim] recovery: {result.recovery_state}")
+    if result.blocked:
         raise typer.Exit(code=2)
 
 
@@ -210,8 +277,13 @@ def setup_command(
 ) -> None:
     """Prepare local browser and vault prerequisites."""
 
-    del force_browser
-    _emit_command_error("setup_unavailable", json_output=json_output)
+    try:
+        result = run_setup(force_browser=force_browser)
+    except Exception as error:
+        # Adapter details may contain local paths or dependency information.
+        del error
+        _emit_command_error("setup_unavailable", json_output=json_output)
+    _emit_setup_result(result, json_output=json_output)
 
 
 @app.command("doctor")
@@ -221,8 +293,13 @@ def doctor_command(
 ) -> None:
     """Inspect local installation and recovery state without probing a target."""
 
-    del db
-    _emit_command_error("diagnostics_blocked", json_output=json_output)
+    try:
+        result = run_doctor(db_path=db, json_output=json_output)
+    except Exception as error:
+        # Diagnostic adapters are intentionally fail-closed at the CLI boundary.
+        del error
+        _emit_command_error("diagnostics_blocked", json_output=json_output)
+    _emit_doctor_result(result, json_output=json_output)
 
 
 @app.command("report")
