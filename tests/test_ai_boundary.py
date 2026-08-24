@@ -42,8 +42,8 @@ def _scope(path: Path, *, allowed_path: str, client_name: str) -> ScopeGuard:
                 "client_name": client_name,
                 "authorization_reference": "PT-2026-P5-BOUNDARY",
                 "confirmed": True,
-                "starts_at": "2026-08-24T10:00:00Z",
-                "expires_at": "2026-08-24T14:00:00Z",
+                "starts_at": "2020-01-01T00:00:00Z",
+                "expires_at": "2099-01-01T00:00:00Z",
                 "allowed_hosts": [
                     "llm.example.test" if client_name == "AI provider" else "api.example.test"
                 ],
