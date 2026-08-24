@@ -133,3 +133,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   needed. Implementer reports targeted modules 102 passed and full pytest 373
   passed with Ruff, strict mypy, and diff-check green. Independent review is
   pending; after approval P3b is complete.
+- Task 5 independently approved: no raw sentinel crosses state, SQLite,
+  reporting, AI, or MCP boundaries; 373 full-suite tests passed. **P3b is
+  complete** across Tasks 1–5. P4d may now begin against the locked
+  `AdapterRecordView` contract.
