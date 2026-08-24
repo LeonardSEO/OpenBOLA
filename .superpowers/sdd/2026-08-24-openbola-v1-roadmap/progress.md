@@ -192,3 +192,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
 - P5 Task 2 implementation is committed as `264e76d`: strict proposal JSON
   parsing and exact inventory/target-scope validation. Local AI tests reached
   51 passed with Ruff and strict mypy; independent review is pending.
+- P5 Task 2 fix `d0a308b` adds strict canonical HTTPS target-origin validation
+  including invalid/zero/out-of-range ports and exact ScopeGuard path proof.
+  Re-review approved; 28 focused tests, Ruff, and strict mypy pass. Task 3
+  provider clients may begin.
