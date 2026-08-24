@@ -146,8 +146,16 @@ plans before it.
      `{"fields": {"name": {"stringValue": "..."}}}`, not plain JSON) is
      explicitly out of scope for P4c and not yet planned; a P4c-2 slot is
      reserved for it, written just-in-time whenever it's prioritized.
-   - **P4d** — Hasura adapter, written just-in-time now that P4a/P4b/P4c's
-     contracts and the origin/tenant-isolation and
+   - **P3b** — Full-fidelity in-session capture. This is a separate plan,
+     `2026-08-24-openbola-p3b-full-fidelity-session-capture.md`, and is
+     sequenced **before P4d**. It preserves `RequestRecord` as sanitized,
+     transferable evidence; full request/response/session material lives only
+     behind process-local session handles. A callback-only ephemeral adapter
+     view may resolve raw `RequestRecord` values during one synchronous
+     provider call, but may not return, persist, report, send to AI, or expose
+     them through MCP. *Status: planned (2026-08-24).*
+   - **P4d** — Hasura adapter, written just-in-time after P3b and now that
+     P4a/P4b/P4c's contracts and the origin/tenant-isolation and
      sensitive-field/sensitive-parent-guard precedents have landed.
 
    Ruling: every `RequestRecord` this codebase produces today (from both
@@ -166,10 +174,10 @@ plans before it.
    until this is caught. Resolution: `FieldInventory` (P4a) tracks field
    *names* only, not value types (type inference from a redacted body
    would be meaningless — every leaf is the string `"[REDACTED]"`). The
-   full-fidelity in-session path becomes explicit new work, tracked as
-   **P3b — full-fidelity in-session capture**, inserted before P8 (the TUI
-   needs it) and revisited once P4-P7 clarify exactly what "full value" a
-   findings/reporting view actually needs to hold in memory.
+   full-fidelity in-session path becomes explicit new work, tracked as P3b
+   before P4d and P8. P3b's handle-only local detail contract is sufficient
+   for the active TUI; P7 owns the typed finding/export boundary and retains
+   its sanitized-only contract.
 5. **P5 — BYOK AI planning**. `AIProviderConfig`/`ProposedTest` contracts,
    `openai_compatible` + `azure_openai` clients, sanitized-context builder,
    and the validator that intersects every proposed handle/method/field/path
