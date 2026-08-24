@@ -233,3 +233,6 @@ boundaries. External P11 publication actions remain separately approval-gated.
   candidates/operations/inventory/plan/outcome and strict all-record preflight
   with exact grant/scope/budget checks. Fourteen mutation tests passed; Ruff
   and strict mypy are green. Independent review is pending.
+- P6 Task 1 redaction fix is in `a0d08b0`: runtime target/canary/credential
+  material is omitted from repr and plan/candidate pickling fails closed.
+  Re-review approved; 15 focused tests and full 490-suite regression pass.
