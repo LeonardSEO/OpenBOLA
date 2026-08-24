@@ -255,36 +255,28 @@ class InSessionCapture:
 
     def with_adapter_records(
         self,
-        consumer: Callable[[Sequence[RequestRecord]], tuple[ResourceInventory, ...]],
+        consumer: Callable[[Sequence[AdapterRecordView]], tuple[ResourceInventory, ...]],
     ) -> tuple[ResourceInventory, ...]:
         self._require_open()
-        raw_records: tuple[RequestRecord, ...] = ()
+        adapter_views: tuple[AdapterRecordView, ...] = ()
         try:
-            raw_records = tuple(
-                RequestRecord(
-                    exchange.record.identity,
-                    exchange.record.method,
-                    request.url,
-                    request.headers,
-                    request.body,
-                    response.status,
-                    response.headers,
-                    response.body,
+            adapter_views = tuple(
+                AdapterRecordView(
+                    record=exchange.record,
+                    request_body=self.request_material(exchange).body,
+                    response_body=self.response_material(exchange).body,
                 )
                 for exchange in self.exchanges
-                for request, response in [
-                    (self.request_material(exchange), self.response_material(exchange))
-                ]
             )
             try:
-                result = consumer(raw_records)
+                result = consumer(adapter_views)
             except Exception:
                 raise CaptureError("session adapter failed") from None
             if not self._is_safe_adapter_result(result):
                 raise CaptureError("session adapter result must be a ResourceInventory tuple")
             return result
         finally:
-            raw_records = ()
+            adapter_views = ()
 
     def close(self) -> None:
         if not self._closed:

@@ -1635,6 +1635,7 @@ def test_session_material_rejects_serialization() -> None:
 
 def test_in_session_capture_adapter_bridge_rejects_unsafe_results(tmp_path: Path) -> None:
     from openbola.capture import (
+        AdapterRecordView,
         InSessionCapture,
         SessionExchange,
         SessionRequestMaterial,
@@ -1648,11 +1649,13 @@ def test_in_session_capture_adapter_bridge_rejects_unsafe_results(tmp_path: Path
     har_path.write_text('{"log":{"entries":[]}}', encoding="utf-8")
     request_handle = registry.store_value(
         kind="session_state",
-        value=SessionRequestMaterial("https://api.example.test/v1/items/42", {}, None),
+        value=SessionRequestMaterial(
+            "https://api.example.test/v1/items/42", {}, b"FULL_VALUE_SENTINEL"
+        ),
     )
     response_handle = registry.store_value(
         kind="session_state",
-        value=SessionResponseMaterial(200, {}, None),
+        value=SessionResponseMaterial(200, {}, b"FULL_VALUE_SENTINEL"),
     )
     state_handle = registry.store_value(kind="session_state", value={"cookies": []})
     exchange = SessionExchange(
@@ -1708,7 +1711,20 @@ def test_in_session_capture_adapter_bridge_rejects_unsafe_results(tmp_path: Path
     )
     object.__setattr__(injected_state_inventory, "unexpected_state", object())
 
-    assert capture.with_adapter_records(lambda _records: (safe_inventory,)) == (safe_inventory,)
+    seen_views: list[AdapterRecordView] = []
+
+    def safe_consumer(records: Any) -> tuple[ResourceInventory, ...]:
+        seen_views.extend(records)
+        return (safe_inventory,)
+
+    assert capture.with_adapter_records(safe_consumer) == (safe_inventory,)
+    assert len(seen_views) == 1
+    assert seen_views[0].record is exchange.record
+    assert seen_views[0].record.url.endswith("[REDACTED]")
+    assert seen_views[0].request_body == b"FULL_VALUE_SENTINEL"
+    assert seen_views[0].response_body == b"FULL_VALUE_SENTINEL"
+    with pytest.raises(CaptureError, match="ResourceInventory tuple"):
+        capture.with_adapter_records(lambda records: (records[0],))  # type: ignore[arg-type]
     for result in (
         raw_record,
         [raw_record],
