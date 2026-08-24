@@ -176,6 +176,16 @@ class SupabaseAdapter:
         return tuple(inventories)
 
 
+# PostgREST is the protocol implemented by Supabase's REST surface.  Keep one
+# adapter implementation and one canonical inventory provider name so a
+# discovery pass does not duplicate every table when traffic is self-hosted
+# PostgREST rather than hosted by Supabase.
+PostgRESTAdapter = SupabaseAdapter
+# Backward-compatible spelling for callers that used the initial all-caps
+# acronym alias. Both names point to the same implementation.
+PostGRESTAdapter = PostgRESTAdapter
+
+
 if TYPE_CHECKING:
 
     def _supabase_adapter_satisfies_provider_adapter(
