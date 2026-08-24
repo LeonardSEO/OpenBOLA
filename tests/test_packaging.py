@@ -80,13 +80,13 @@ def test_archive_and_checksum_are_deterministic(tmp_path: Path) -> None:
         ]
         assert archive.extractfile("openbola.sha256").read().endswith(b"  openbola\n")
     sums = tmp_path / "SHA256SUMS"
-    write_sha256sums(
-        [
-            TargetArtifact(target, "0.1.0", tmp_path / f"openbola-{target}", "", "a" * 64)
-            for target in TARGETS
-        ],
-        sums,
-    )
+    checksum_artifacts = []
+    for target in TARGETS:
+        suffix = ".zip" if target == "windows-x64" else ".tar.gz"
+        archive = tmp_path / f"openbola-0.1.0-{target}{suffix}"
+        archive.write_bytes(target.encode())
+        checksum_artifacts.append(TargetArtifact(target, "0.1.0", archive, "", "a" * 64))
+    write_sha256sums(checksum_artifacts, sums)
     lines = sums.read_text().splitlines()
     assert lines == sorted(lines, key=lambda line: line.split("  ", 1)[1])
 

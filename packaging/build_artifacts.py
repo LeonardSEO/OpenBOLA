@@ -29,6 +29,7 @@ _VERSION_RE = re.compile(
 _FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 _MAC_MODES = 0o100755
 _DATA_MODES = 0o100644
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,21 @@ def _archive_name(target: str, version: str) -> str:
     raise ValueError("unsupported target")
 
 
+def _parse_archive_name(name: str) -> tuple[str, str] | None:
+    match = re.fullmatch(
+        r"openbola-(?P<version>(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){1,3}"
+        r"(?:(?:a|b|rc)[0-9]+|\.post[0-9]+|\.dev[0-9]+)?)"
+        r"-(?P<target>windows-x64|macos-arm64|macos-x64)\.(?P<suffix>zip|tar\.gz)",
+        name,
+    )
+    if match is None:
+        return None
+    target = match.group("target")
+    if match.group("suffix") != ("zip" if target == "windows-x64" else "tar.gz"):
+        return None
+    return match.group("version"), target
+
+
 def _atomic_bytes(destination: Path, content: bytes) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
@@ -157,6 +173,7 @@ def archive_target(
     license_file: Path,
     readme_file: Path,
     installer_file: Path,
+    source_root: Path | None = None,
 ) -> TargetArtifact:
     """Create one allowlisted deterministic target archive."""
 
@@ -167,6 +184,18 @@ def archive_target(
     license_path = _regular_file(license_file, "license")
     readme_path = _regular_file(readme_file, "readme")
     installer_path = _regular_file(installer_file, "installer")
+    if source_root is not None:
+        root = Path(source_root).resolve(strict=True)
+        for label, candidate in (
+            ("executable", executable_path),
+            ("license", license_path),
+            ("readme", readme_path),
+            ("installer", installer_path),
+        ):
+            try:
+                candidate.relative_to(root)
+            except ValueError as error:
+                raise ValueError(f"{label} is outside source root") from error
     expected_executable = "openbola.exe" if target == "windows-x64" else "openbola"
     expected_installer = "install.ps1" if target == "windows-x64" else "install.sh"
     if executable_path.name != expected_executable:
@@ -199,6 +228,15 @@ def write_sha256sums(artifacts: Sequence[TargetArtifact], output: Path) -> None:
     names = [item.archive.name for item in artifacts]
     if len(set(names)) != len(names):
         raise ValueError("duplicate archive names")
+    for item in artifacts:
+        if _parse_archive_name(item.archive.name) != (item.version, item.target):
+            raise ValueError("archive metadata does not match target")
+        if item.archive.is_symlink() or not item.archive.is_file():
+            raise ValueError("archive must be a regular file")
+        if not isinstance(item.archive_digest, str) or not _SHA256_RE.fullmatch(
+            item.archive_digest
+        ):
+            raise ValueError("archive digest is invalid")
     lines = [f"{item.archive_digest}  {item.archive.name}" for item in artifacts]
     content = "\n".join(sorted(lines, key=lambda line: line.split("  ", 1)[1])) + "\n"
     _atomic_bytes(Path(output), content.encode())
@@ -221,9 +259,11 @@ def _cli() -> int:
     try:
         if args.command == "archive":
             version = _validate_version(args.version)
+            root = args.project_root.resolve()
+            if version != read_project_version(root / "pyproject.toml"):
+                raise ValueError("archive version does not match project version")
             if args.tag is not None and args.tag != f"v{version}":
                 raise ValueError("tag does not match project version")
-            root = args.project_root.resolve()
             archive_target(
                 target=args.target,
                 version=version,
@@ -234,6 +274,7 @@ def _cli() -> int:
                 installer_file=root / "packaging" / (
                     "install.ps1" if args.target == "windows-x64" else "install.sh"
                 ),
+                source_root=root,
             )
         else:
             archives = sorted(args.output_dir.glob("openbola-*.zip")) + sorted(
