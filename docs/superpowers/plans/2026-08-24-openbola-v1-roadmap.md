@@ -20,7 +20,8 @@ plans before it.
    distribution name, MCP server name, report schema id). Add platform
    data-root path resolution (spec §8). Add the `ValueHandle` /
    `SessionValueRegistry` contract (spec §5) alongside the existing
-   `CredentialVault`/`CredentialRef` pattern it extends. *Status: in progress.*
+   `CredentialVault`/`CredentialRef` pattern it extends. *Status: complete,
+   merged to main (2026-08-24).*
 2. **P2 — Scope & mutation grants**. Extend `scope.py`'s YAML/contract with
    `MutationGrant`/`MutationRecordScope`/`PathRule` (spec §6): explicit
    fields, `all_discovered` record scope, `max_records`/`max_requests`
