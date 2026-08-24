@@ -26,6 +26,7 @@ plans before it.
    `MutationGrant`/`MutationRecordScope`/`PathRule` (spec §6): explicit
    fields, `all_discovered` record scope, `max_records`/`max_requests`
    budgets, canary create/delete flag. Fail-closed on unknown keys.
+   *Status: complete, merged to main (2026-08-24).*
 3. **P3 — Login recipes & Playwright capture**. Replace HAR/replay-only
    `capture.py` with live Playwright identity capture: `LoginRecipe`
    contract (spec §5), isolated per-identity browser contexts, scope
