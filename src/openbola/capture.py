@@ -503,8 +503,8 @@ class _FullFidelityEventCollector:
             self._reserve(material_size)
             material = SessionRequestMaterial(url, normalized_headers, body)
             handle = self._registry.store_value(kind="session_state", value=material)
-        except CaptureError:
-            raise
+        except CaptureError as exc:
+            raise _safe_full_capture_error(exc) from None
         except Exception:
             raise CaptureError("full capture event stream is incomplete") from None
         with self._lock:
@@ -553,11 +553,7 @@ class _FullFidelityEventCollector:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
-            safe_error = (
-                exc
-                if isinstance(exc, CaptureError) and str(exc) in _SAFE_FULL_CAPTURE_ERRORS
-                else CaptureError("full capture event stream is incomplete")
-            )
+            safe_error = _safe_full_capture_error(exc)
             with self._lock:
                 self._task_errors.append(safe_error)
 
@@ -655,6 +651,12 @@ class _FullFidelityEventCollector:
                 SessionExchange(record, request_item[1], response_item[1])
             )
         return tuple(exchanges), state_handle
+
+
+def _safe_full_capture_error(error: BaseException) -> CaptureError:
+    if isinstance(error, CaptureError) and str(error) in _SAFE_FULL_CAPTURE_ERRORS:
+        return error
+    return CaptureError("full capture event stream is incomplete")
 
 
 async def capture_har(

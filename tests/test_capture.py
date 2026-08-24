@@ -1212,6 +1212,27 @@ def test_capture_session_sanitizes_response_body_exceptions(
     assert not (config.capture_root / config.output_path).exists()
 
 
+def test_full_collector_sanitizes_request_property_exceptions() -> None:
+    from openbola import capture
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    collector = capture._FullFidelityEventCollector(registry)
+
+    class HostileRequest:
+        method = "GET"
+        headers: dict[str, str] = {}
+
+        @property
+        def url(self) -> str:
+            raise CaptureError("RAW_VALUE_SENTINEL")
+
+    with pytest.raises(CaptureError, match="event stream is incomplete") as excinfo:
+        collector._on_request(HostileRequest())
+    assert "RAW_VALUE_SENTINEL" not in str(excinfo.value)
+    registry.close()
+
+
 @pytest.mark.parametrize(
     ("response_body", "exchange_count", "message"),
     [
