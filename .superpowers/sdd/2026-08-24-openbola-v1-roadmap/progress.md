@@ -200,3 +200,8 @@ boundaries. External P11 publication actions remain separately approval-gated.
   OpenAI-compatible/Azure clients with fake-transport privacy, redirect,
   bounds, and error tests. Implementer reports 82 combined AI/client tests
   passed with Ruff/mypy; independent review is pending.
+- P5 Task 3 hardening commits `00eb794`, `2a8eca9`, `48d8821`, and `3572e92`
+  (reports `3e67fd3`, `d6f65da`) close ScopeGuard provenance/peer policy,
+  routing headers, strict JSON recursion, streaming bounds, and header/secret
+  encoding. Final review approved; 97 focused AI/client tests pass with Ruff
+  and strict mypy. Task 4 legacy migration/acceptance is next.
