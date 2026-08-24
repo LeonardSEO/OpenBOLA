@@ -47,3 +47,13 @@ def test_parse_ignores_variable_lookalikes_in_comments_and_strings() -> None:
     assert _parse_operation('query { orders { note(format: "$fake") } }') is not None
     assert _parse_operation("fragment OrderFields on orders { id }") is None
     assert _parse_operation("query { __schema { types { name } } }") is None
+
+
+def test_parse_rejects_mismatched_or_empty_argument_delimiters() -> None:
+    assert _parse_operation("query { orders(where: [id: 1)) { id } }") is None
+    assert _parse_operation("query { orders(where: {id: 1]) { id } }") is None
+    assert _parse_operation("query { orders(where: ) { id } }") is None
+
+
+def test_parse_rejects_numeric_tokens_with_identifier_suffixes() -> None:
+    assert _parse_operation("query { orders(limit: 123abc) { id } }") is None

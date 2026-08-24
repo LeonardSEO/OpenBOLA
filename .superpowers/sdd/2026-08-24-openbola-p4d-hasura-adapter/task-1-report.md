@@ -29,3 +29,11 @@
 - The change is stdlib-only and does not add network, provider registration, or
   capture persistence behavior; those belong to later P4d tasks.
 - Existing unrelated working-tree documentation/example edits were preserved.
+
+## Review fix
+
+- Hardened delimiter handling with a full nested delimiter stack so mismatched
+  parentheses, brackets, and braces fail closed.
+- Rejected empty/trailing argument values and numeric tokens with identifier
+  suffixes, with explicit regression tests for the reviewer examples.
+- Revalidated parser tests (5 passed), Ruff, and strict mypy.

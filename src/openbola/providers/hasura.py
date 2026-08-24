@@ -38,6 +38,8 @@ _NUMBER_RE = re.compile(
     r"(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)"
 )
 _PUNCTUATION = frozenset("!$():=@[]{|}&")
+_OPEN_DELIMITERS = {"(": ")", "[": "]", "{": "}"}
+_CLOSE_DELIMITERS = frozenset(_OPEN_DELIMITERS.values())
 
 
 def _lex(document: str) -> tuple[_Token, ...] | None:
@@ -102,6 +104,10 @@ def _lex(document: str) -> tuple[_Token, ...] | None:
             continue
         number = _NUMBER_RE.match(document, index)
         if number is not None:
+            if number.end() < length and (
+                document[number.end()].isalnum() or document[number.end()] in "_."
+            ):
+                return None
             tokens.append(_Token("literal"))
             index = number.end()
             continue
@@ -125,16 +131,22 @@ def _consume_balanced(
 ) -> tuple[tuple[_Token, ...], int] | None:
     if not _is(tokens, index, "punctuation", opening):
         return None
-    depth = 1
+    delimiters = [closing]
     cursor = index + 1
     start = cursor
     while cursor < len(tokens):
-        if _is(tokens, cursor, "punctuation", opening):
-            depth += 1
-        elif _is(tokens, cursor, "punctuation", closing):
-            depth -= 1
-            if depth == 0:
-                return tokens[start:cursor], cursor + 1
+        token = tokens[cursor]
+        if token.kind == "punctuation" and token.value in _OPEN_DELIMITERS:
+            delimiters.append(_OPEN_DELIMITERS[token.value])
+        elif token.kind == "punctuation" and token.value in _CLOSE_DELIMITERS:
+            if not delimiters or token.value != delimiters[-1]:
+                return None
+            delimiters.pop()
+            if not delimiters:
+                inner = tokens[start:cursor]
+                if not inner or inner[-1].value == ":":
+                    return None
+                return inner, cursor + 1
         cursor += 1
     return None
 
