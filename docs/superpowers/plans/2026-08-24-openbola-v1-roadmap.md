@@ -41,7 +41,36 @@ plans before it.
 4. **P4 — Resource/provider inventory**. `ResourceInventory`/
    `ProviderAdapter` contracts (spec §5) plus the four required adapters:
    generic HTTP/OpenAPI/GraphQL, Supabase/PostgREST, Firebase, Hasura, each
-   against deterministic fixtures (acceptance criterion 4).
+   against deterministic fixtures (acceptance criterion 4). This is itself
+   a multi-subsystem plan (4 largely-independent adapters sharing one
+   contract) — split into sequential sub-plans rather than one giant plan:
+   - **P4a** — contracts (`ProviderConfidence`, `FieldInventory`,
+     `ResourceInventory`, `ProviderDetection`, `ProviderAdapter`) plus the
+     generic HTTP adapter, reusing `endpoints.py`'s existing `templatize()`
+     path-templating rather than reimplementing it.
+   - **P4b/P4c/P4d** — Supabase/PostgREST, Firebase, Hasura adapters,
+     written just-in-time after P4a lands its contract.
+
+   Ruling: every `RequestRecord` this codebase produces today (from both
+   `capture.py`'s live collector and its HAR parser) already has its body
+   *leaf values* redacted to the literal string `"[REDACTED]"` by
+   `_sanitize_body`/`_redact_json` — only JSON *key names* and *path
+   segments* survive redaction; query-parameter values are redacted too.
+   There is currently no full-fidelity in-session `RequestRecord` path
+   anywhere in the codebase, even transiently. Spec §7 step 9 / §8 /
+   acceptance criterion 8 ("full values visible during the active TUI
+   session") therefore needs a new full-fidelity capture/collector path
+   that does not exist yet and is out of scope for both P3 (already
+   shipped, sanitized-only, correctly so per its own non-goals) and P4
+   (inventory only ever sees what `RequestRecord` already carries). Cost
+   if wrong: acceptance criterion 8 silently has no implementation owner
+   until this is caught. Resolution: `FieldInventory` (P4a) tracks field
+   *names* only, not value types (type inference from a redacted body
+   would be meaningless — every leaf is the string `"[REDACTED]"`). The
+   full-fidelity in-session path becomes explicit new work, tracked as
+   **P3b — full-fidelity in-session capture**, inserted before P8 (the TUI
+   needs it) and revisited once P4-P7 clarify exactly what "full value" a
+   findings/reporting view actually needs to hold in memory.
 5. **P5 — BYOK AI planning**. `AIProviderConfig`/`ProposedTest` contracts,
    `openai_compatible` + `azure_openai` clients, sanitized-context builder,
    and the validator that intersects every proposed handle/method/field/path
