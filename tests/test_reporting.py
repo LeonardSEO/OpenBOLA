@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import xml.etree.ElementTree as ET
@@ -25,6 +27,8 @@ from openbola.reporting import (
     ReportFinding,
     ResourceReport,
     RunSummary,
+    generate_csv_report,
+    generate_html_report,
     generate_json_report,
     generate_junit_xml,
     generate_markdown_report,
@@ -214,6 +218,8 @@ def test_all_formats_are_parseable_deterministic_and_share_safe_summary() -> Non
     junit = ET.fromstring(generate_junit_xml(bundle))  # noqa: S314 - own generated XML
     markdown = generate_markdown_report(bundle)
     sarif = json.loads(generate_sarif_report(bundle))
+    csv_text = generate_csv_report(bundle)
+    html_text = generate_html_report(bundle)
 
     assert report["summary"] == {
         "bola": 1,
@@ -244,6 +250,49 @@ def test_all_formats_are_parseable_deterministic_and_share_safe_summary() -> Non
     assert generate_junit_xml(bundle) == generate_junit_xml(bundle)
     assert generate_markdown_report(bundle) == generate_markdown_report(bundle)
     assert generate_sarif_report(bundle) == generate_sarif_report(bundle)
+    assert generate_csv_report(bundle) == csv_text
+    assert generate_html_report(bundle) == html_text
+
+
+def test_csv_has_sanitized_resource_capability_rows() -> None:
+    proof = CapabilityProof(
+        "read", "proven", "identity_a", "identity_b", 200, 200,
+        "object_id_match", "not_applicable", "complete",
+    )
+    resource = ResourceReport(
+        "generic-http", "confirmed", "documents", "/documents/{id}", 1,
+        (ReportField("id", "string"),), (proof,),
+    )
+    bundle = ReportBundle.from_outcomes(
+        findings=(), outcomes=(), scope_target_label="staging",
+        authorization_reference="scope-reference", resources=(resource,),
+    )
+    csv_text = generate_csv_report(bundle)
+    rows = list(csv.DictReader(io.StringIO(csv_text)))
+    assert rows[0]["capability"] == "read"
+    assert rows[0]["endpoint_template"] == "/documents/{id}"
+    assert "REPORT_FULL_VALUE_SENTINEL" not in csv_text
+
+
+def test_html_is_self_contained_csp_safe_and_escaped() -> None:
+    finding = ReportFinding(
+        "/documents/{id}", "GET", "high", "<script>REPORT_XSS</script>",
+        "Attacker received an object.",
+        FindingEvidence(
+            "obj_" + "a" * 64, (), (), (), "high",
+            ("GET /documents/{id}",), "Enforce ownership checks.",
+            "not_applicable", "complete",
+        ),
+    )
+    bundle = ReportBundle.from_outcomes(
+        findings=(finding,), outcomes=(), scope_target_label="staging",
+        authorization_reference="scope-reference",
+    )
+    html_text = generate_html_report(bundle)
+    assert "Content-Security-Policy" in html_text
+    assert "src=" not in html_text and "https://" not in html_text
+    assert "&lt;script&gt;REPORT_XSS&lt;/script&gt;" in html_text
+    assert "REPORT_FULL_VALUE_SENTINEL" not in html_text
 
 
 def test_zero_findings_and_zero_tests_have_distinct_non_misleading_reports() -> None:
@@ -395,10 +444,8 @@ def test_bundle_reads_only_opaque_object_references_from_state(tmp_path: Path) -
     report = json.loads(generate_json_report(bundle))
 
     object_ref = object_ref_fingerprint(raw_object_id)
-    assert report["findings"][0]["evidence"] == {
-        "attacker_status": 200,
-        "object_ref": object_ref,
-    }
+    assert report["findings"][0]["evidence"]["object_ref"] == object_ref
+    assert report["findings"][0]["evidence"]["capabilities"][0]["status"] == "not_tested"
     assert raw_object_id not in generate_json_report(bundle)
 
 
@@ -410,7 +457,7 @@ def test_write_reports_publishes_complete_new_bundle_and_never_follows_symlinks(
     paths = write_reports(bundle, output_dir=report_dir)
     secret = "REPORT_SECRET_SENTINEL"  # noqa: S105 - test sentinel
 
-    assert set(paths) == {"json", "junit", "markdown", "sarif"}
+    assert set(paths) == {"json", "markdown", "csv", "html", "junit", "sarif"}
     assert all(path.is_file() for path in paths.values())
     assert all(secret.encode() not in path.read_bytes() for path in paths.values())
 

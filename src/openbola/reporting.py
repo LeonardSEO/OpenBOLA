@@ -8,9 +8,12 @@ being mistaken for proof that a target was tested.
 
 from __future__ import annotations
 
+import csv
 import ctypes
 import errno
 import hashlib
+import html
+import io
 import json
 import os
 import platform
@@ -50,10 +53,12 @@ _ALLOWED_COMPARISONS = frozenset(
 )
 _ALLOWED_ERROR_CODES = frozenset(error_code.value for error_code in ErrorCode)
 _ARTIFACT_FILENAMES = {
-    "json": "bola_report.json",
-    "junit": "bola_report.junit.xml",
-    "markdown": "bola_report.md",
-    "sarif": "bola_report.sarif",
+    "json": "report.json",
+    "markdown": "report.md",
+    "csv": "report.csv",
+    "html": "report.html",
+    "junit": "junit.xml",
+    "sarif": "report.sarif",
 }
 _RENAME_EXCL = 0x00000004
 _RENAME_NOREPLACE = 0x00000001
@@ -777,7 +782,7 @@ def serialize_evidence(evidence: Mapping[str, Any] | FindingEvidence) -> dict[st
 def generate_json_report(bundle: ReportBundle) -> str:
     """Generate a canonical JSON report without timestamps or credential material."""
 
-    return _canonical_json(_report_document(bundle)) + "\n"
+    return _canonical_json(canonical_report_document(bundle)) + "\n"
 
 
 def generate_junit_xml(bundle: ReportBundle) -> str:
@@ -825,25 +830,26 @@ def generate_junit_xml(bundle: ReportBundle) -> str:
                     "message": _xml_text(finding.description),
                 },
             )
-            failure.text = _xml_text(_canonical_json(serialize_evidence(outcome.evidence)))
+            failure.text = _xml_text(_canonical_json(_outcome_document(outcome)))
         elif outcome.verdict in {Verdict.INCONCLUSIVE, Verdict.SKIPPED}:
             skipped_node = ET.SubElement(
                 case,
                 "skipped",
                 {"type": outcome.verdict.value, "message": _xml_text(_junit_skip_message(outcome))},
             )
-            skipped_node.text = _xml_text(_canonical_json(serialize_evidence(outcome.evidence)))
+            skipped_node.text = _xml_text(_canonical_json(_outcome_document(outcome)))
     return ET.tostring(suite, encoding="unicode", short_empty_elements=True) + "\n"
 
 
 def generate_markdown_report(bundle: ReportBundle) -> str:
     """Generate a safe, deterministic human-readable report."""
 
+    document = canonical_report_document(bundle)
     summary = _summary(bundle)
     lines = ["# BOLA/IDOR assessment report", ""]
     lines.extend(
         [
-            f"Scope target: {_markdown_inline(bundle.scope_target_label)}",
+            f"Scope target: {_markdown_inline(cast(str, document['scope']['target_label']))}",
             f"Authorization reference fingerprint: `{bundle.authorization_reference_fingerprint}`",
             "",
             "## Outcome summary",
@@ -878,11 +884,39 @@ def generate_markdown_report(bundle: ReportBundle) -> str:
         )
 
     lines.extend(["## Limitations", ""])
-    for limitation in bundle.limitations:
+    for limitation in cast(list[str], document["limitations"]):
         lines.append(f"- {_markdown_inline(limitation)}")
     lines.append("")
+    lines.extend(["## Resources", ""])
+    if not bundle.resources:
+        lines.extend(["No discovered resources are included in this report.", ""])
+    else:
+        lines.extend(
+            [
+                "| Provider | Dataset | Endpoint | Discovered | Capabilities |",
+                "|---|---|---|---:|---|",
+            ]
+        )
+        for resource in sorted(bundle.resources, key=_resource_key):
+            capabilities = ", ".join(
+                f"{item.capability}: {item.status}" for item in resource.capabilities
+            ) or "none"
+            lines.append(
+                "| "
+                + " | ".join(
+                    (
+                        _markdown_inline(resource.provider),
+                        _markdown_inline(resource.dataset),
+                        _markdown_inline(resource.endpoint_template),
+                        str(resource.total_discovered),
+                        _markdown_inline(capabilities),
+                    )
+                )
+                + " |"
+            )
+        lines.append("")
     lines.extend(["## Findings", ""])
-    findings = _ordered_findings(bundle.findings)
+    findings = _ordered_typed_findings(bundle.findings)
     if not findings:
         lines.append("No findings are included in this report.")
         lines.append("")
@@ -899,16 +933,164 @@ def generate_markdown_report(bundle: ReportBundle) -> str:
                 "",
             ]
         )
-        evidence = _canonical_json(serialize_evidence(finding.evidence))
+        evidence = _canonical_json(_typed_evidence_document(finding.evidence))
         fence = _markdown_fence(evidence)
         lines.extend([fence + "json", evidence, fence, ""])
     return "\n".join(lines)
 
 
+_CSV_HEADER = (
+    "provider",
+    "confidence",
+    "dataset",
+    "endpoint_template",
+    "total_discovered",
+    "field_names",
+    "field_types",
+    "capability",
+    "capability_status",
+    "owner_identity_ref",
+    "attacker_identity_ref",
+    "owner_status",
+    "attacker_status",
+    "cleanup_status",
+    "coverage_status",
+)
+
+
+def generate_csv_report(bundle: ReportBundle) -> str:
+    """Generate the deterministic resource/capability matrix as CSV."""
+
+    document = canonical_report_document(bundle)
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(_CSV_HEADER)
+    for resource in sorted(bundle.resources, key=_resource_key):
+        fields = tuple(_resource_document(resource)["fields"])
+        field_names = ";".join(item["name"] for item in fields)
+        field_types = ";".join(item["type"] for item in fields)
+        resource_document = next(
+            item
+            for item in cast(list[dict[str, Any]], document["resources"])
+            if item["provider"] == resource.provider
+            and item["dataset"] == resource.dataset
+            and item["endpoint_template"] == resource.endpoint_template
+        )
+        for capability in resource.capabilities:
+            row = (
+                resource_document["provider"],
+                resource_document["confidence"],
+                resource_document["dataset"],
+                resource_document["endpoint_template"],
+                resource_document["total_discovered"],
+                field_names,
+                field_types,
+                capability.capability,
+                capability.status,
+                capability.owner_identity_ref or "",
+                capability.attacker_identity_ref or "",
+                capability.owner_status or "",
+                capability.attacker_status or "",
+                capability.cleanup,
+                capability.coverage,
+            )
+            writer.writerow(row)
+    return output.getvalue()
+
+
+def generate_html_report(bundle: ReportBundle) -> str:
+    """Generate a self-contained, CSP-constrained HTML report."""
+
+    document = canonical_report_document(bundle)
+
+    def esc(value: object) -> str:
+        return html.escape(_safe_display_text(str(value)), quote=True)
+
+    summary = _summary(bundle)
+    rows: list[str] = []
+    for finding in _ordered_typed_findings(bundle.findings):
+        rows.append(
+            "<tr class=\"finding\">"
+            f"<td>{esc(finding.severity)}</td>"
+            f"<td>{esc(finding.method)} {esc(finding.endpoint_template)}</td>"
+            f"<td>{esc(finding.title)}</td>"
+            f"<td>{esc(finding.description)}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows.append(
+            '<tr class="finding"><td colspan="4">'
+            "No findings are included in this report.</td></tr>"
+        )
+
+    resource_rows: list[str] = []
+    for resource in sorted(bundle.resources, key=_resource_key):
+        for capability in resource.capabilities:
+            resource_rows.append(
+                "<tr class=\"resource\">"
+                f"<td>{esc(resource.provider)}</td>"
+                f"<td>{esc(resource.dataset)}</td>"
+                f"<td>{esc(resource.endpoint_template)}</td>"
+                f"<td>{resource.total_discovered}</td>"
+                f"<td>{esc(capability.capability)}</td>"
+                f"<td>{esc(capability.status)}</td>"
+                "</tr>"
+            )
+    if not resource_rows:
+        resource_rows.append(
+            '<tr class="resource"><td colspan="6">'
+            "No discovered resources are included in this report.</td></tr>"
+        )
+
+    target = cast(dict[str, str], document["scope"])["target_label"]
+    fingerprint = cast(dict[str, str], document["authorization"])["reference_fingerprint"]
+    return "".join(
+        (
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
+            '<meta http-equiv="Content-Security-Policy" '
+            'content="default-src \'none\'; style-src \'unsafe-inline\'; '
+            'script-src \'unsafe-inline\'">',
+            "<title>OpenBOLA report</title><style>",
+            "body{font-family:system-ui,sans-serif;line-height:1.4;margin:2rem;" 
+            "background:#fff;color:#111}table{border-collapse:collapse;width:100%;margin:1rem 0}" 
+            "th,td{border:1px solid #bbb;padding:.4rem;text-align:left}"
+            "input{padding:.4rem;min-width:18rem}"
+            "</style></head><body>",
+            "<h1>BOLA/IDOR assessment report</h1>",
+            f"<p>Scope target: <span>{esc(target)}</span><br>"
+            f"Authorization reference fingerprint: <code>{esc(fingerprint)}</code></p>",
+            "<h2>Outcome summary</h2><ul>",
+            f"<li>Candidate combinations: {summary.total_combinations}</li>",
+            f"<li>Executed outcomes: {summary.executed}</li>",
+            f"<li>Protected: {summary.protected}</li>",
+            f"<li>BOLA: {summary.bola}</li>",
+            f"<li>Completed coverage: {esc(_coverage_text(summary))}</li>",
+            "</ul>",
+            '<label for="report-filter">Filter findings</label> '
+            '<input id="report-filter" type="search" autocomplete="off">',
+            "<h2>Resources</h2><table><thead><tr><th>Provider</th><th>Dataset</th><th>Endpoint</th><th>Discovered</th><th>Capability</th><th>Status</th></tr></thead><tbody>",
+            "".join(resource_rows),
+            "</tbody></table>",
+            "<h2>Findings</h2><table><thead><tr>"
+            "<th>Severity</th><th>Endpoint</th><th>Title</th><th>Description</th>"
+            "</tr></thead><tbody id=\"findings\">",
+            "".join(rows),
+            "</tbody></table>",
+            "<script>const filter=document.getElementById('report-filter');"
+            "const findings=document.querySelectorAll('#findings .finding');"
+            "filter.addEventListener('input',()=>{const query=filter.value.toLowerCase();"
+            "findings.forEach(row=>{row.hidden=!row.textContent.toLowerCase()"
+            ".includes(query);});});</script>",
+            "</body></html>\n",
+        )
+    )
+
+
 def generate_sarif_report(bundle: ReportBundle) -> str:
     """Generate a deterministic SARIF 2.1.0 document from safe findings."""
 
-    findings = _ordered_findings(bundle.findings)
+    canonical = canonical_report_document(bundle)
+    findings = _ordered_typed_findings(bundle.findings)
     rules = []
     severities = sorted(
         {_finding_severity(item) for item in findings}, key=_SEVERITY_ORDER.__getitem__
@@ -941,11 +1123,10 @@ def generate_sarif_report(bundle: ReportBundle) -> str:
                 "properties": {
                     "endpoint_method": method,
                     "endpoint_template": endpoint,
-                    "evidence": serialize_evidence(finding.evidence),
+                    "evidence": _typed_evidence_document(finding.evidence),
                 },
             }
         )
-    summary = _summary(bundle)
     document = {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
@@ -961,7 +1142,7 @@ def generate_sarif_report(bundle: ReportBundle) -> str:
                 "invocations": [
                     {
                         "executionSuccessful": True,
-                        "properties": {"summary": _summary_document(summary)},
+                        "properties": {"summary": canonical["summary"]},
                     }
                 ],
                 "results": results,
@@ -983,8 +1164,10 @@ def write_reports(bundle: ReportBundle, *, output_dir: str | Path) -> dict[str, 
 
     documents = {
         "json": generate_json_report(bundle),
-        "junit": generate_junit_xml(bundle),
         "markdown": generate_markdown_report(bundle),
+        "csv": generate_csv_report(bundle),
+        "html": generate_html_report(bundle),
+        "junit": generate_junit_xml(bundle),
         "sarif": generate_sarif_report(bundle),
     }
     parent_fd, final_name, destination = _open_report_parent(output_dir)
