@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Literal, NoReturn, Protocol, TypeVar
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from openbola.discovery import ResourceInventory
+from openbola.discovery import FieldInventory, ProviderConfidence, ResourceInventory
 from openbola.handles import SecretHandle, SessionValueStore, ValueHandle
 from openbola.models import RequestRecord
 from openbola.scope import ScopeDecision, ScopeError, ScopeGuard
@@ -142,6 +142,9 @@ class SessionRequestMaterial:
     headers: Mapping[str, str] = field(repr=False)
     body: bytes | None = field(repr=False)
 
+    def __reduce__(self) -> NoReturn:
+        raise TypeError("Session request material serialization is disabled.")
+
 
 @dataclass(frozen=True)
 class SessionResponseMaterial:
@@ -150,6 +153,9 @@ class SessionResponseMaterial:
     status: int
     headers: Mapping[str, str] = field(repr=False)
     body: bytes | None = field(repr=False)
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError("Session response material serialization is disabled.")
 
 
 @dataclass(frozen=True)
@@ -257,9 +263,7 @@ class InSessionCapture:
                 result = consumer(raw_records)
             except Exception:
                 raise CaptureError("session adapter failed") from None
-            if not isinstance(result, tuple) or not all(
-                isinstance(item, ResourceInventory) for item in result
-            ):
+            if not self._is_safe_adapter_result(result):
                 raise CaptureError("session adapter result must be a ResourceInventory tuple")
             return result
         finally:
@@ -325,6 +329,58 @@ class InSessionCapture:
             )
         except Exception:
             return False
+
+    @staticmethod
+    def _is_safe_adapter_result(value: object) -> bool:
+        return type(value) is tuple and all(
+            InSessionCapture._is_safe_resource_inventory(item) for item in value
+        )
+
+    @staticmethod
+    def _is_safe_resource_inventory(value: object) -> bool:
+        if type(value) is not ResourceInventory or set(vars(value)) != {
+            "provider",
+            "provider_confidence",
+            "resource_name",
+            "endpoint_template",
+            "fields",
+            "record_handles",
+            "observed_methods",
+        }:
+            return False
+        return (
+            type(value.provider) is str
+            and type(value.provider_confidence) is ProviderConfidence
+            and type(value.resource_name) is str
+            and type(value.endpoint_template) is str
+            and type(value.fields) is tuple
+            and all(InSessionCapture._is_safe_field_inventory(field) for field in value.fields)
+            and type(value.record_handles) is tuple
+            and all(
+                InSessionCapture._is_safe_value_handle(handle)
+                for handle in value.record_handles
+            )
+            and type(value.observed_methods) is frozenset
+            and all(type(method) is str for method in value.observed_methods)
+        )
+
+    @staticmethod
+    def _is_safe_field_inventory(value: object) -> bool:
+        return (
+            type(value) is FieldInventory
+            and set(vars(value)) == {"name"}
+            and type(value.name) is str
+        )
+
+    @staticmethod
+    def _is_safe_value_handle(value: object) -> bool:
+        return (
+            type(value) is ValueHandle
+            and set(vars(value)) == {"id", "kind"}
+            and type(value.id) is str
+            and type(value.kind) is str
+            and value.kind in {"record_id", "field_value", "body", "session_state"}
+        )
 
 
 class CaptureCollector(Protocol):

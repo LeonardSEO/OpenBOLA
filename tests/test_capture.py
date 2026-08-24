@@ -1396,3 +1396,98 @@ def test_in_session_capture_rejects_malformed_resolved_material(tmp_path: Path) 
 
     with pytest.raises(CaptureError, match="request material"):
         capture.request_material(exchange)
+
+
+def test_session_material_rejects_serialization() -> None:
+    import pickle
+
+    from openbola.capture import SessionRequestMaterial, SessionResponseMaterial
+
+    materials = (
+        SessionRequestMaterial(
+            "https://api.example.test/v1/items/FULL_VALUE_SENTINEL",
+            {"Authorization": "FULL_VALUE_SENTINEL"},
+            b"FULL_VALUE_SENTINEL",
+        ),
+        SessionResponseMaterial(
+            200,
+            {"Set-Cookie": "FULL_VALUE_SENTINEL"},
+            b"FULL_VALUE_SENTINEL",
+        ),
+    )
+
+    for material in materials:
+        assert "FULL_VALUE_SENTINEL" not in repr(material)
+        with pytest.raises(TypeError, match="serialization"):
+            pickle.dumps(material)
+
+
+def test_in_session_capture_adapter_bridge_rejects_unsafe_results(tmp_path: Path) -> None:
+    from openbola.capture import (
+        InSessionCapture,
+        SessionExchange,
+        SessionRequestMaterial,
+        SessionResponseMaterial,
+    )
+    from openbola.discovery import FieldInventory, ProviderConfidence, ResourceInventory
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    har_path = tmp_path / "capture.har"
+    har_path.write_text('{"log":{"entries":[]}}', encoding="utf-8")
+    request_handle = registry.store_value(
+        kind="session_state",
+        value=SessionRequestMaterial("https://api.example.test/v1/items/42", {}, None),
+    )
+    response_handle = registry.store_value(
+        kind="session_state",
+        value=SessionResponseMaterial(200, {}, None),
+    )
+    state_handle = registry.store_value(kind="session_state", value={"cookies": []})
+    exchange = SessionExchange(
+        RequestRecord("alice", "GET", "https://api.example.test/v1/items/[REDACTED]"),
+        request_handle,
+        response_handle,
+    )
+    capture = InSessionCapture(har_path, (exchange,), state_handle, registry)
+    raw_record = RequestRecord(
+        "alice",
+        "GET",
+        "https://api.example.test/v1/items/FULL_VALUE_SENTINEL",
+    )
+    safe_inventory = ResourceInventory(
+        provider="generic",
+        provider_confidence=ProviderConfidence.UNKNOWN,
+        resource_name="items",
+        endpoint_template="/v1/items/{id}",
+        fields=(FieldInventory("name"),),
+        record_handles=(registry.store_value(kind="record_id", value="42"),),
+        observed_methods=frozenset({"GET"}),
+    )
+    unsafe_inventory = ResourceInventory(
+        provider="generic",
+        provider_confidence=ProviderConfidence.UNKNOWN,
+        resource_name="items",
+        endpoint_template="/v1/items/{id}",
+        fields=(raw_record,),
+        record_handles=(),
+        observed_methods=frozenset({"GET"}),
+    )
+
+    assert capture.with_adapter_records(lambda _records: (safe_inventory,)) == (safe_inventory,)
+    for result in (
+        raw_record,
+        [raw_record],
+        {"record": raw_record},
+        (raw_record,),
+        (unsafe_inventory,),
+    ):
+        with pytest.raises(CaptureError, match="ResourceInventory tuple"):
+            capture.with_adapter_records(lambda _records, result=result: result)
+
+    def failing_consumer(_records: object) -> tuple[ResourceInventory, ...]:
+        raise RuntimeError("FULL_VALUE_SENTINEL")
+
+    with pytest.raises(CaptureError, match="session adapter failed") as excinfo:
+        capture.with_adapter_records(failing_consumer)  # type: ignore[arg-type]
+    assert "FULL_VALUE_SENTINEL" not in str(excinfo.value)
