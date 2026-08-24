@@ -143,3 +143,6 @@ boundaries. External P11 publication actions remain separately approval-gated.
 - P3b prerequisite is complete and approved. P4d Task 1 parser/contracts is
   now in progress against `AdapterRecordView`; Hasura implementation must stay
   stdlib-only and perform no network operation.
+- P4d Task 1 implementation is committed as `e4522ce`: bounded stdlib GraphQL
+  lexer/parser contracts and tests. Parser review is pending; Task 2 will add
+  detection/inventory only after approval.
