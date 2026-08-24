@@ -184,8 +184,8 @@ class AdapterRecordView:
     """Ephemeral adapter input with raw bodies valid only in one callback."""
 
     record: RequestRecord
-    request_body: bytes | None = field(repr=False)
-    response_body: bytes | None = field(repr=False)
+    request_body: bytes | None = field(default=None, repr=False)
+    response_body: bytes | None = field(default=None, repr=False)
 
     def __reduce__(self) -> NoReturn:
         raise TypeError("Adapter record view serialization is disabled.")

@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from openbola.discovery import (
@@ -133,7 +133,7 @@ class FirebaseRealtimeDatabaseAdapter:
         return ProviderDetection(provider="firebase-rtdb", confidence=ProviderConfidence.UNKNOWN)
 
     def inventory(self, records: Sequence[AdapterRecordView]) -> tuple[ResourceInventory, ...]:
-        groups: dict[tuple[str, str], list[AdapterRecordView | RequestRecord]] = {}
+        groups: dict[tuple[str, str], list[AdapterRecordView]] = {}
         for view in records:
             record = adapter_record(view)
             split = urlsplit(record.url)
@@ -150,7 +150,7 @@ class FirebaseRealtimeDatabaseAdapter:
         inventories: list[ResourceInventory] = []
         for origin, template in sorted(groups):
             group = groups[(origin, template)]
-            confidence = self.detect(cast(Sequence[Any], group)).confidence
+            confidence = self.detect(group).confidence
             methods = frozenset(adapter_record(view).method.upper() for view in group)
 
             field_names: set[str] = set()

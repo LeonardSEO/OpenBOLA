@@ -80,17 +80,18 @@ def _record(
     body: bytes | None = None,
     response_body: bytes | None = None,
     response_status: int | None = 200,
-) -> RequestRecord:
-    return RequestRecord(
+) -> AdapterRecordView:
+    record = RequestRecord(
         "alice",
         method,
         url,
         {},
-        body,
+        b"{}" if body is not None else None,
         response_status,
         {},
-        response_body,
+        b"{}" if response_body is not None else None,
     )
+    return AdapterRecordView(record, body, response_body)
 
 
 def test_generic_adapter_detect_is_always_unknown_confidence() -> None:
@@ -135,7 +136,9 @@ def test_generic_adapter_groups_records_by_templatized_endpoint() -> None:
     assert collection.resource_name == "users"
     assert collection.observed_methods == frozenset({"GET", "POST"})
     assert {f.name for f in collection.fields} == {"email", "name", "id"}
-    assert collection.record_handles == ()  # no path-embedded ID at this template
+    assert {
+        registry.resolve_value(handle) for handle in collection.record_handles
+    } == {"43"}
 
     item = by_template["/v1/users/{id}"]
     assert item.observed_methods == frozenset({"GET", "PATCH"})
@@ -311,7 +314,7 @@ def test_generic_adapter_reads_raw_bodies_only_from_ephemeral_adapter_view() -> 
         response_body=b'{"id":"[REDACTED]","name":"[REDACTED]"}',
     )
     view = AdapterRecordView(
-        record=safe_record,
+        record=safe_record.record,
         request_body=json.dumps({"id": "42"}).encode(),
         response_body=json.dumps({"id": "42", "name": "Widget"}).encode(),
     )

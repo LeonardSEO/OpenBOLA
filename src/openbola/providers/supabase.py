@@ -21,7 +21,7 @@ per function name, not collapsed together -- each function gets its own
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qsl, urlsplit
 
 from openbola.discovery import (
@@ -38,7 +38,6 @@ from openbola.discovery import (
 )
 from openbola.endpoints import _is_sensitive_field, is_object_id
 from openbola.handles import InMemorySessionValueRegistry
-from openbola.models import RequestRecord
 
 if TYPE_CHECKING:
     from openbola.capture import AdapterRecordView
@@ -125,7 +124,7 @@ class SupabaseAdapter:
         return ProviderDetection(provider="supabase", confidence=ProviderConfidence.UNKNOWN)
 
     def inventory(self, records: Sequence[AdapterRecordView]) -> tuple[ResourceInventory, ...]:
-        groups: dict[tuple[str, str], list[AdapterRecordView | RequestRecord]] = {}
+        groups: dict[tuple[str, str], list[AdapterRecordView]] = {}
         for view in records:
             record = adapter_record(view)
             split = urlsplit(record.url)
@@ -140,7 +139,7 @@ class SupabaseAdapter:
         inventories: list[ResourceInventory] = []
         for origin, table in sorted(groups):
             group = groups[(origin, table)]
-            confidence = self.detect(cast(Sequence[Any], group)).confidence
+            confidence = self.detect(group).confidence
             methods = frozenset(adapter_record(view).method.upper() for view in group)
 
             field_names: set[str] = set()

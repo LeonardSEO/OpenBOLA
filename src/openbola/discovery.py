@@ -66,28 +66,16 @@ class ProviderAdapter(Protocol):
     def inventory(self, records: Sequence[AdapterRecordView]) -> tuple[ResourceInventory, ...]: ...
 
 
-def adapter_record(view: AdapterRecordView | RequestRecord) -> RequestRecord:
-    """Return the sanitized record carried by an ephemeral adapter view.
-
-    RequestRecord input remains accepted at runtime for compatibility with the
-    pre-session discovery callers. New capture-to-provider paths pass only
-    ``AdapterRecordView`` values, whose raw bodies are deliberately handled by
-    the owning adapter rather than copied into the persistent record.
-    """
-    if isinstance(view, RequestRecord):
-        return view
+def adapter_record(view: AdapterRecordView) -> RequestRecord:
+    """Return the sanitized record carried by an ephemeral adapter view."""
     return view.record
 
 
-def adapter_request_body(view: AdapterRecordView | RequestRecord) -> bytes | None:
-    if isinstance(view, RequestRecord):
-        return view.body
+def adapter_request_body(view: AdapterRecordView) -> bytes | None:
     return view.request_body
 
 
-def adapter_response_body(view: AdapterRecordView | RequestRecord) -> bytes | None:
-    if isinstance(view, RequestRecord):
-        return view.response_body
+def adapter_response_body(view: AdapterRecordView) -> bytes | None:
     return view.response_body
 
 
@@ -104,7 +92,7 @@ class GenericAdapter:
         return ProviderDetection(provider="generic", confidence=ProviderConfidence.UNKNOWN)
 
     def inventory(self, records: Sequence[AdapterRecordView]) -> tuple[ResourceInventory, ...]:
-        groups: dict[tuple[str, str], list[AdapterRecordView | RequestRecord]] = {}
+        groups: dict[tuple[str, str], list[AdapterRecordView]] = {}
         for candidate in records:
             record = adapter_record(candidate)
             split = urlsplit(record.url)
@@ -127,9 +115,8 @@ class GenericAdapter:
                     classify_key(key, field_names, object_ids)
                 for key in top_level_json_keys(response_body):
                     classify_key(key, field_names, object_ids)
-                if not isinstance(member, RequestRecord):
-                    object_ids.update(_body_object_ids(request_body))
-                    object_ids.update(_body_object_ids(response_body))
+                object_ids.update(_body_object_ids(request_body))
+                object_ids.update(_body_object_ids(response_body))
                 object_ids.update(extract_object_ids(record.url))
 
             fields = tuple(FieldInventory(name=name) for name in sorted(field_names))

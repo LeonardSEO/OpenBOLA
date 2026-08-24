@@ -1317,6 +1317,15 @@ def test_session_adapter_callback_rejects_raw_result_escapes(
     assert session.with_adapter_records(lambda _records: ()) == ()
 
 
+def test_adapter_record_view_defaults_raw_material_to_none() -> None:
+    from openbola.capture import AdapterRecordView
+
+    view = AdapterRecordView(RequestRecord("alice", "GET", "https://api.example.test"))
+
+    assert view.request_body is None
+    assert view.response_body is None
+
+
 def test_capture_har_performs_automated_login(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

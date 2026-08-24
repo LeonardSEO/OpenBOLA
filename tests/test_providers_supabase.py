@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from openbola.capture import AdapterRecordView
 from openbola.discovery import ProviderConfidence
 from openbola.handles import InMemorySessionValueRegistry
 from openbola.models import RequestRecord
@@ -14,17 +15,18 @@ def _record(
     body: bytes | None = None,
     response_body: bytes | None = None,
     response_status: int | None = 200,
-) -> RequestRecord:
-    return RequestRecord(
+) -> AdapterRecordView:
+    record = RequestRecord(
         "alice",
         method,
         url,
-        headers or {},
-        body,
+        {name: "[REDACTED]" for name in (headers or {})},
+        None,
         response_status,
         {},
-        response_body,
+        None,
     )
+    return AdapterRecordView(record, body, response_body)
 
 
 def test_detect_confirmed_with_apikey_header_and_rest_path() -> None:
