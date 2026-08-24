@@ -59,11 +59,13 @@ these contracts:
 | Provider discovery | `providers/` | Generic HTTP plus Hasura, Supabase, PostgREST, and Firebase evidence adapters |
 | Local MCP adapter | `mcp_server.py` | Optional stdio adapter around a testable service; FastMCP is lazy-loaded |
 | Reports | `reporting.py` | Deterministic `report.html`, `report.csv`, `report.json`, `report.md`, `junit.xml`, and `report.sarif` output |
-| CLI/TUI | `cli.py`, `pipeline.py`, `tui.py` | Interactive local TUI plus headless, scope-enforced commands with machine-safe JSON mode |
+| CLI/TUI | `cli.py`, `pipeline.py`, `session.py` | Headless, scope-enforced commands with machine-safe JSON mode; the Textual TUI is the open P8 integration gate |
 | Local demo | `mock_target.py` | Ephemeral `127.0.0.1` vulnerable and protected endpoints |
 
-The installed `openbola` entry point opens the local TUI when invoked without a
-subcommand, while headless commands remain available for CI and automation.
+The planned no-argument `openbola` entry point will open the local TUI once the
+P8 Textual integration lands. Until then, invoking it without a subcommand
+shows the bounded CLI help; headless commands remain available for CI and
+automation.
 Credentials are supplied only by environment-variable references; a traffic
 HAR is sanitized on import and cannot provide a replay token or response-body
 ownership evidence by itself. Use a bounded, sanitized records JSON file (via
@@ -208,11 +210,11 @@ combinations remain visible in the summary and limitations.
 
 ## CLI and headless CI
 
-The default `openbola` command opens the local TUI. The same safety contracts
-are available to scripts and CI through these headless commands:
+The same safety contracts are available to scripts and CI through these
+headless commands. The no-argument Textual launch remains a P8 milestone:
 
 ```text
-openbola                         # local TUI
+openbola                         # CLI help until the P8 TUI lands
 openbola scan                    # read-only assessment
 openbola setup                   # browser, vault, and local self-test
 openbola doctor                  # platform and recovery diagnostics
