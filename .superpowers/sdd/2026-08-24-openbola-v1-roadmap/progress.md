@@ -217,3 +217,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   boundary test, strict fake transport privacy/binding checks, close fail-
   closed proof, and roadmap P5 marker. Implementer reports focused 106, full
   pytest 475, Ruff, and strict mypy green; independent review is pending.
+- P5 Task 5 independently approved: separate real provider ScopeGuard,
+  MockTransport-only boundary, payload privacy, proposal binding rejection, and
+  registry close proof all pass. **P5 is complete** across Tasks 1–5; P6
+  mutation/recovery planning is next.
