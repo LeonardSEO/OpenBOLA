@@ -166,3 +166,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   parent `_eq` handling, sensitive/range/pattern exclusions, opaque handle
   conversion, and origin isolation all pass review. Task 4 acceptance proof is
   next.
+- P4d Task 4 implementation is committed as `6034f83`: mutation/malformed/
+  protocol acceptance and capture→AdapterRecordView→Hasura proof with
+  sanitized HAR/raw-serialization assertions. Implementer reports focused 22
+  and full pytest 394 passed; independent review is pending.
