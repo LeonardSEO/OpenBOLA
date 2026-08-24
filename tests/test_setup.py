@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
+import openbola.setup as setup_impl
 from openbola import __version__
 from openbola.setup import (
     SETUP_MARKER_SCHEMA,
@@ -158,6 +160,43 @@ def test_vault_key_that_changes_between_reads_fails_closed(tmp_path: Path) -> No
     assert result.reason_code == "vault_unavailable"
     assert installer.install_calls == []
     assert not marker_path(root).exists()
+
+
+def test_vault_that_returns_none_fails_closed(tmp_path: Path) -> None:
+    class EmptyVault:
+        def get_or_create_key(self) -> None:
+            return None
+
+    installer = FakeInstaller()
+    result = run_setup(
+        root=tmp_path / "OpenBOLA",
+        installer=installer,
+        browser_self_test=FakeSelfTest(),
+        vault=EmptyVault(),
+    )
+
+    assert result.reason_code == "vault_unavailable"
+    assert installer.install_calls == []
+
+
+def test_playwright_install_discards_unbounded_subprocess_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(setup_impl, "_playwright_available", lambda: True)
+    calls: list[dict[str, object]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append({"command": command, **kwargs})
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(setup_impl.subprocess, "run", fake_run)
+    setup_impl.PlaywrightInstaller().install()
+
+    assert len(calls) == 1
+    assert calls[0]["stdout"] is subprocess.DEVNULL
+    assert calls[0]["stderr"] is subprocess.DEVNULL
+    assert "capture_output" not in calls[0]
+    assert calls[0]["shell"] is False
 
 
 def test_self_test_failure_does_not_publish_partial_marker(tmp_path: Path) -> None:

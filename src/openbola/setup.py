@@ -290,15 +290,13 @@ class PlaywrightInstaller:
             completed = subprocess.run(  # noqa: S603
                 command,
                 check=False,
-                capture_output=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 timeout=_INSTALL_TIMEOUT_SECONDS,
                 shell=False,
             )
         except (OSError, subprocess.SubprocessError) as error:
             raise SetupError("browser_install_failed") from error
-        # Never include stdout/stderr in an exception or result.  It may contain
-        # local paths or environment-dependent values.
-        del completed.stdout, completed.stderr
         if completed.returncode != 0:
             raise SetupError("browser_install_failed")
 
@@ -344,39 +342,30 @@ def _invoke_install(installer: BrowserInstaller, *, force: bool) -> None:
 def _run_vault_self_test(vault: object) -> None:
     """Exercise the P6 vault without returning or persisting its key."""
 
-    candidate: Any = None
     method: Any = getattr(vault, "get_or_create_key", None)
-    if callable(method):
-        candidate = method()
-        if isinstance(candidate, bytes) and len(candidate) != _RECOVERY_KEY_BYTES:
-            raise SetupError("vault_unavailable")
-        # Read once more through the same boundary to prove an existing key is
-        # accessible after creation.  Do not compare or expose the key.
-        second: Any = method()
-        if isinstance(second, bytes) and len(second) != _RECOVERY_KEY_BYTES:
-            raise SetupError("vault_unavailable")
-        if (
-            isinstance(candidate, bytes)
-            and isinstance(second, bytes)
-            and not hmac.compare_digest(candidate, second)
-        ):
-            raise SetupError("vault_unavailable")
-        del second
-    else:
+    if not callable(method):
         for method_name in ("ensure_key", "get_key"):
-            method = getattr(vault, method_name, None)
-            if callable(method):
-                candidate = method()
+            candidate_method = getattr(vault, method_name, None)
+            if callable(candidate_method):
+                method = candidate_method
                 break
         else:
             raise SetupError("vault_unavailable")
-        if isinstance(candidate, bytes) and len(candidate) != _RECOVERY_KEY_BYTES:
-            raise SetupError("vault_unavailable")
-    # An approved key provider may intentionally return None from ensure_key;
-    # a provider that returns a value must return bytes of the AES-256 size.
-    if candidate is not None and not isinstance(candidate, bytes):
+
+    first: Any = method()
+    second: Any = method()
+    # Both calls must return the complete AES-256 key.  This proves that a
+    # provider can create/read through its boundary and rejects ``None``,
+    # short values, rotating values, and non-byte secret wrappers alike.
+    if (
+        type(first) is not bytes
+        or type(second) is not bytes
+        or len(first) != _RECOVERY_KEY_BYTES
+        or len(second) != _RECOVERY_KEY_BYTES
+        or not hmac.compare_digest(first, second)
+    ):
         raise SetupError("vault_unavailable")
-    del candidate
+    del first, second
 
 
 def _run_self_test(self_test: BrowserSelfTest | Any) -> bool:
