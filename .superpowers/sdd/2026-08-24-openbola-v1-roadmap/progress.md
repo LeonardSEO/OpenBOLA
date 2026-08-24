@@ -137,3 +137,9 @@ boundaries. External P11 publication actions remain separately approval-gated.
   reporting, AI, or MCP boundaries; 373 full-suite tests passed. **P3b is
   complete** across Tasks 1–5. P4d may now begin against the locked
   `AdapterRecordView` contract.
+
+## P4d execution status
+
+- P3b prerequisite is complete and approved. P4d Task 1 parser/contracts is
+  now in progress against `AdapterRecordView`; Hasura implementation must stay
+  stdlib-only and perform no network operation.
