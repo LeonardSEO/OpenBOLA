@@ -273,3 +273,8 @@ boundaries. External P11 publication actions remain separately approval-gated.
   evidence cannot infer mutation proof. Independent review approved the gate:
   37 focused tests, full pytest 505, Ruff, and strict mypy pass. **P7 is
   complete across Tasks 1–5.**
+- P9 Task 1 is committed as `2dd699e`: typed `CommandResult`, bounded
+  administration command registration (`setup`, `doctor`, `report`, `update`,
+  `mcp`), stable `--version`, and secret-free error mapping while preserving
+  `scan`. Independent review approved it with 6 CLI tests, Ruff, and mypy.
+  The no-argument TUI launch remains intentionally deferred to P8.
