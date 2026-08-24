@@ -114,3 +114,6 @@ boundaries. External P11 publication actions remain separately approval-gated.
   is pending.
 - Follow-up `f6b1c44` closes the duplicate-response race while an earlier body
   task is still draining; it is included in the pending independent review.
+- Follow-ups `4288ea3` and `5d97a11` close the registry on setup failure and
+  expose the reviewed `AdapterRecordView` callback contract with regression
+  tests. Task 3 re-review is pending; Task 4 remains the next P3b gate.
