@@ -123,3 +123,8 @@ boundaries. External P11 publication actions remain separately approval-gated.
   interfaces consume `AdapterRecordView`, and scope/lifecycle/capture-to-
   discovery regressions are present. Focused capture/discovery tests: 77
   passed; Ruff and strict mypy passed. Independent review is pending.
+- Task 4 fix `0155fc4` (plus contract documentation `f226cff`) removes all
+  `RequestRecord` compatibility bypasses, defaults both ephemeral body fields,
+  and makes GenericAdapter's synchronous body-ID inspection explicit. Review
+  approved; 112 focused provider/discovery/capture tests passed with Ruff and
+  strict mypy. P3b is now ready for final report-boundary checks before P4d.
