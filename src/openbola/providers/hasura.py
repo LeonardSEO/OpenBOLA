@@ -23,6 +23,7 @@ from openbola.discovery import (
     ResourceInventory,
     adapter_record,
 )
+from openbola.endpoints import _id_field, _is_sensitive_field, is_object_id
 from openbola.handles import InMemorySessionValueRegistry
 
 if TYPE_CHECKING:
@@ -469,6 +470,28 @@ def _resource_name(root_field: str) -> str | None:
 _HASURA_HEADER_NAMES = frozenset({"x-hasura-role", "x-hasura-admin-secret"})
 _GRAPHQL_PATHS = frozenset({"/graphql", "/v1/graphql"})
 _REDACTED = "[REDACTED]"
+_NON_SINGLE_RECORD_OPERATORS = frozenset(
+    {
+        "_in",
+        "_nin",
+        "in",
+        "nin",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "like",
+        "ilike",
+        "regex",
+        "_gt",
+        "_gte",
+        "_lt",
+        "_lte",
+        "_like",
+        "_ilike",
+        "_regex",
+    }
+)
 
 
 def _origin(url: str) -> str | None:
@@ -518,6 +541,57 @@ def _has_hasura_header(headers: Mapping[str, str]) -> bool:
 def _is_graphql_payload(view: AdapterRecordView) -> bool:
     document = _graphql_document(view)
     return document is not None and _parse_operation(document) is not None
+
+
+def _record_ids_for_variable(name: str, value: object) -> set[str]:
+    """Return safe, single-record IDs referenced by one GraphQL variable.
+
+    Hasura boolean-expression variables may contain many values that look like
+    identifiers but do not identify one observed record (membership, ranges,
+    pattern filters, and nested arbitrary input).  Only ID-named scalar fields
+    and equality values directly below an ID-named field are eligible.
+    """
+
+    if _is_sensitive_field(name):
+        return set()
+
+    record_ids: set[str] = set()
+
+    def walk(current: object, parent_key: str | None = None) -> None:
+        if isinstance(current, Mapping):
+            for raw_key, child in current.items():
+                if not isinstance(raw_key, str):
+                    continue
+                key = raw_key
+                if _is_sensitive_field(key):
+                    continue
+                if key.casefold() in _NON_SINGLE_RECORD_OPERATORS:
+                    continue
+                if isinstance(child, (str, int)) and not isinstance(child, bool):
+                    candidate = str(child)
+                    is_id_value = _id_field(key) and is_object_id(candidate)
+                    is_id_equality = (
+                        key == "_eq"
+                        and parent_key is not None
+                        and _id_field(parent_key)
+                        and is_object_id(candidate)
+                    )
+                    if is_id_value or is_id_equality:
+                        record_ids.add(candidate)
+                    continue
+                walk(child, key)
+            return
+        if isinstance(current, list):
+            for child in current:
+                walk(child, parent_key)
+
+    if isinstance(value, (str, int)) and not isinstance(value, bool):
+        candidate = str(value)
+        if _id_field(name) and is_object_id(candidate):
+            record_ids.add(candidate)
+    else:
+        walk(value)
+    return record_ids
 
 
 class HasuraAdapter:
@@ -580,6 +654,7 @@ class HasuraAdapter:
             group = groups[(origin, path, resource_name)]
             confidence = self.detect(group).confidence
             field_names: set[str] = set()
+            object_ids: set[str] = set()
             for view in group:
                 document = _graphql_document(view)
                 if document is None:
@@ -587,6 +662,8 @@ class HasuraAdapter:
                 parsed = _parse_operation(document)
                 if parsed is None:
                     continue
+                payload = _request_json(view)
+                variables = payload.get("variables") if payload is not None else None
                 for root in parsed.roots:
                     if _resource_name(root.field_name) != resource_name:
                         continue
@@ -600,7 +677,20 @@ class HasuraAdapter:
                         for field in selected
                         if re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*", field)
                     )
+                    if isinstance(variables, Mapping):
+                        for variable_name in root.variable_names:
+                            if variable_name not in variables:
+                                continue
+                            object_ids.update(
+                                _record_ids_for_variable(
+                                    variable_name, variables[variable_name]
+                                )
+                            )
             methods = frozenset(adapter_record(view).method.upper() for view in group)
+            record_handles = tuple(
+                self._registry.store_value(kind="record_id", value=object_id)
+                for object_id in sorted(object_ids)
+            )
             inventories.append(
                 ResourceInventory(
                     provider=self.name,
@@ -608,7 +698,7 @@ class HasuraAdapter:
                     resource_name=resource_name,
                     endpoint_template=path or "/",
                     fields=tuple(FieldInventory(name=name) for name in sorted(field_names)),
-                    record_handles=(),
+                    record_handles=record_handles,
                     observed_methods=methods,
                 )
             )

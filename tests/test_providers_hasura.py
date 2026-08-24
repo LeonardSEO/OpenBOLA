@@ -161,3 +161,93 @@ def test_detection_never_exposes_header_values() -> None:
         _view({"query": "query { orders { id } }"}, headers={"x-hasura-admin-secret": sentinel})
     ])
     assert sentinel not in repr(detection)
+
+
+def test_inventory_maps_each_variable_to_its_own_root_resource() -> None:
+    registry = InMemorySessionValueRegistry()
+    adapter = HasuraAdapter(registry)
+    record = _view(
+        {
+            "query": (
+                "query($orderId: uuid!, $userId: uuid!) { "
+                "orders_by_pk(id: $orderId) { id } users_by_pk(id: $userId) { id } }"
+            ),
+            "variables": {
+                "orderId": "550e8400-e29b-41d4-a716-446655440000",
+                "userId": "507f1f77bcf86cd799439011",
+            },
+        },
+        headers={"x-hasura-role": "user"},
+    )
+    inventories = {item.resource_name: item for item in adapter.inventory([record])}
+    assert {registry.resolve_value(h) for h in inventories["orders"].record_handles} == {
+        "550e8400-e29b-41d4-a716-446655440000"
+    }
+    assert {registry.resolve_value(h) for h in inventories["users"].record_handles} == {
+        "507f1f77bcf86cd799439011"
+    }
+
+
+def test_inventory_extracts_only_id_and_id_eq_variables() -> None:
+    registry = InMemorySessionValueRegistry()
+    adapter = HasuraAdapter(registry)
+    record = _view(
+        {
+            "query": (
+                "query($id: uuid!, $where: orders_bool_exp!) { "
+                "orders_by_pk(id: $id) { id } orders(where: $where) { id } }"
+            ),
+            "variables": {
+                "id": "550e8400-e29b-41d4-a716-446655440000",
+                "where": {
+                    "id": {"_eq": "507f1f77bcf86cd799439011"},
+                    "status": {"_in": ["paid", "new"]},
+                },
+            },
+        },
+        headers={"x-hasura-role": "user"},
+    )
+    values = {
+        registry.resolve_value(handle)
+        for inventory in adapter.inventory([record])
+        for handle in inventory.record_handles
+    }
+    assert values == {
+        "550e8400-e29b-41d4-a716-446655440000",
+        "507f1f77bcf86cd799439011",
+    }
+
+
+def test_sensitive_variable_or_sensitive_parent_never_becomes_a_handle() -> None:
+    registry = InMemorySessionValueRegistry()
+    adapter = HasuraAdapter(registry)
+    sentinel = "opaque_secret_record_4eC39HqLyjWDarjtT1zdp7dc"  # noqa: S105
+    record = _view(
+        {
+            "query": (
+                "query($apiTokenId: uuid!, $where: api_keys_bool_exp!) { "
+                "api_keys_by_pk(id: $apiTokenId) { id } "
+                "api_keys(where: $where) { id } }"
+            ),
+            "variables": {
+                "apiTokenId": sentinel,
+                "where": {"secret_token": {"_eq": sentinel}},
+            },
+        },
+        headers={"x-hasura-role": "user"},
+    )
+    inventory = adapter.inventory([record])[0]
+    assert inventory.record_handles == ()
+    assert sentinel not in repr(inventory)
+
+
+def test_inline_literals_and_in_filters_never_mint_handles() -> None:
+    adapter = HasuraAdapter(InMemorySessionValueRegistry())
+    record = _view(
+        {
+            "query": "query { orders(where: {id: {_in: [1, 2]}}) { id } }",
+            "variables": {},
+        },
+        headers={"x-hasura-role": "user"},
+    )
+    assert adapter.inventory([record])[0].record_handles == ()
