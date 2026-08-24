@@ -4,7 +4,7 @@
 
 **Goal:** Capture complete request, response, and browser-session material only behind process-local handles, while preserving the existing sanitized HAR contract and enabling an active TUI to inspect values and run provider discovery without making those values transferable or persistent.
 
-**Architecture:** Keep `RequestRecord` as the sanitized, transferable evidence contract. `capture_session()` performs one scope-routed Playwright run with two collectors: the current sanitized HAR collector and a new full-fidelity collector that stores raw material only in `SessionValueStore` and returns handle-only `InSessionCapture` exchanges. The only bridge to provider discovery is an explicit callback that resolves temporary full `RequestRecord` instances, invokes the callback synchronously, and drops its local references before returning.
+**Architecture:** Keep `RequestRecord` as the sanitized, transferable evidence contract. `capture_session()` performs one scope-routed Playwright run with two collectors: the current sanitized HAR collector and a new full-fidelity collector that stores raw material only in `SessionValueStore` and returns handle-only `InSessionCapture` exchanges. The only bridge to provider discovery resolves temporary full `RequestRecord` instances, invokes one callback synchronously, and accepts only a tuple of `ResourceInventory` values before dropping its local references; no raw result may escape through the callback return value.
 
 **Tech Stack:** Python 3.11+, stdlib `asyncio`/`dataclasses`/`typing`, existing optional `playwright.async_api`, pytest with `asyncio.run()`, Ruff, strict mypy.
 
@@ -20,6 +20,7 @@
 - The collector must await every scheduled response-body task, convert collector failures into `CaptureError` without embedding a raw value, and close the session-value store on capture failure.
 - `InSessionCapture.close()` is a logical access revocation: it clears the in-memory store and causes all subsequent resolve/view calls to fail. It makes no secure-erasure claim for Python objects or filesystem remnants.
 - Full values are visible only through explicit active-session methods. The TUI must mask header/cookie material by default; this phase provides the data boundary, not a UI.
+- `with_adapter_records()` is an internal trusted-adapter boundary. Its runtime whitelist guarantees that no raw value can escape through its return value; a callback that deliberately logs or stores its received raw records violates this contract and is outside what Python can prevent.
 - No new dependency is added. Do not modify pipeline, reporting, state, MCP, AI, provider, scope, or executor production code in this phase.
 
 ---
@@ -198,12 +199,13 @@ class InSessionCapture:
     def response_material(self, exchange: SessionExchange) -> SessionResponseMaterial: ...
     def browser_state(self) -> Mapping[str, object]: ...
     def with_adapter_records(
-        self, consumer: Callable[[Sequence[RequestRecord]], T]
-    ) -> T: ...
+        self,
+        consumer: Callable[[Sequence[RequestRecord]], tuple[ResourceInventory, ...]],
+    ) -> tuple[ResourceInventory, ...]: ...
     def close(self) -> None: ...
 ```
 
-`SessionRequestMaterial` and `SessionResponseMaterial` are frozen private-to-capture dataclasses with `repr=False` on raw fields. They contain the raw URL, header mapping, and body for an exchange; both are stored only as `ValueHandle(kind="session_state")` values. `InSessionCapture` stores the `SessionValueStore` in a non-repr private field, disables pickle via `__reduce__`, and rejects a foreign exchange, a closed capture, a wrong handle kind, or a malformed resolved value with a non-sensitive `CaptureError`.
+`SessionRequestMaterial` and `SessionResponseMaterial` are frozen private-to-capture dataclasses with `repr=False` on raw fields. They contain the raw URL, header mapping, and body for an exchange; both are stored only as `ValueHandle(kind="session_state")` values. `InSessionCapture` stores the `SessionValueStore` in a non-repr private field, disables pickle via `__reduce__`, and rejects a foreign exchange, a closed capture, a wrong handle kind, or a malformed resolved value with a non-sensitive `CaptureError`. Its callback bridge accepts only `tuple[ResourceInventory, ...]`; a direct raw `RequestRecord`, or any list/dict/tuple nesting a raw record, fails closed before return.
 
 - [ ] **Step 1: Write failing boundary tests**
 
@@ -215,13 +217,15 @@ def test_in_session_capture_exposes_raw_material_only_via_session_handles(tmp_pa
     from openbola.handles import InMemorySessionValueRegistry
 
     registry = InMemorySessionValueRegistry()
+    har_path = tmp_path / "capture.har"
+    har_path.write_text('{"log":{"entries":[]}}', encoding="utf-8")
     safe = RequestRecord("alice", "GET", "https://api.example.test/v1/items/[REDACTED]")
     request_handle = registry.store_value(kind="session_state", value=object())
     response_handle = registry.store_value(kind="session_state", value=object())
     state_handle = registry.store_value(kind="session_state", value={"cookies": []})
     exchange = SessionExchange(safe, request_handle, response_handle)
 
-    capture = InSessionCapture(tmp_path / "capture.har", (exchange,), state_handle, registry)
+    capture = InSessionCapture(har_path, (exchange,), state_handle, registry)
 
     assert "FULL_VALUE_SENTINEL" not in repr(capture)
     assert capture.exchanges[0].record.url.endswith("[REDACTED]")
@@ -237,6 +241,8 @@ def test_in_session_capture_close_revokes_every_handle(tmp_path: Path) -> None:
     from openbola.handles import InMemorySessionValueRegistry
 
     registry = InMemorySessionValueRegistry()
+    har_path = tmp_path / "capture.har"
+    har_path.write_text('{"log":{"entries":[]}}', encoding="utf-8")
     request_handle = registry.store_value(
         kind="session_state",
         value=SessionRequestMaterial("https://api.example.test/v1/items/42", {}, None),
@@ -246,7 +252,7 @@ def test_in_session_capture_close_revokes_every_handle(tmp_path: Path) -> None:
     )
     state_handle = registry.store_value(kind="session_state", value={"cookies": []})
     exchange = SessionExchange(RequestRecord("alice", "GET", "https://api.example.test/v1/items/42"), request_handle, response_handle)
-    capture = InSessionCapture(tmp_path / "capture.har", (exchange,), state_handle, registry)
+    capture = InSessionCapture(har_path, (exchange,), state_handle, registry)
 
     assert capture.response_material(exchange).body == b"FULL_VALUE_SENTINEL"
     capture.close()
@@ -264,7 +270,7 @@ Expected: FAIL because `SessionExchange`, `InSessionCapture`, and the material d
 
 - [ ] **Step 3: Add the handle-only data model without changing `RequestRecord`**
 
-Add imports for `Callable`, `Iterator`, `Sequence`, `TypeVar`, `NoReturn`, `SessionValueStore`, and `ValueHandle`. Define `T = TypeVar("T")`, then add these exact raw-material types after `LoginRecipe`:
+Add imports for `Callable`, `Sequence`, `NoReturn`, `SessionValueStore`, `ValueHandle`, and `ResourceInventory`. Import `ResourceInventory` from `openbola.discovery`; that module depends only on models and handles, so it does not introduce a cycle. Then add these exact raw-material types after `LoginRecipe`:
 
 ```python
 @dataclass(frozen=True)
@@ -288,7 +294,7 @@ class SessionExchange:
     response_material_handle: ValueHandle
 ```
 
-Implement `InSessionCapture` with a custom `__init__` that validates a regular, non-symlink HAR path, non-empty exchanges, handle kind `session_state`, and `isinstance(registry, SessionValueStore)`. Resolve material through one private `_resolve_material(handle, expected_type, label)` method, and make `close()` delegate to `self._registry.close()` exactly once. `with_adapter_records()` must create a local tuple of raw `RequestRecord` instances from the two resolved material objects, call `consumer(records)`, and in `finally` replace the local tuple with `()`; it must never return the raw records themselves. Make `__reduce__` raise `TypeError("InSessionCapture serialization is disabled.")`.
+Implement `InSessionCapture` with a custom `__init__` that validates a regular, non-symlink HAR path, non-empty exchanges, handle kind `session_state`, and `isinstance(registry, SessionValueStore)`. Resolve material through one private `_resolve_material(handle, expected_type, label)` method, and make `close()` delegate to `self._registry.close()` exactly once. `with_adapter_records()` must create a local tuple of raw `RequestRecord` instances from the two resolved material objects, call its consumer, and accept the result only when `isinstance(result, tuple)` and every item is a `ResourceInventory`; otherwise raise `CaptureError("session adapter result must be a ResourceInventory tuple")`. In `finally`, replace the local raw-record tuple with `()`. This runtime whitelist rejects direct or nested raw-record returns because neither a `RequestRecord` nor a container is a `ResourceInventory`. Make `__reduce__` raise `TypeError("InSessionCapture serialization is disabled.")`.
 
 The `RequestRecord` constructed inside `with_adapter_records()` uses raw values only in this local expression:
 
@@ -347,7 +353,9 @@ async def capture_session(
 
 - [ ] **Step 1: Write failing dual-collector, async, and limit tests**
 
-Add a fake Playwright harness to `tests/test_capture.py` in which `Context.on()` records handlers, `Page.click()` emits one request/response, and `FakeResponse.body()` is async. Add these tests with the literal sentinels shown:
+Add `_full_session_harness()` to `tests/test_capture.py`. It must mint login handles in the supplied `InMemorySessionValueRegistry`, construct a `LoginRecipe`, and return `CaptureConfig(..., login_recipe=recipe)` so `_run_scoped_capture()` creates a page and calls `Page.click()` exactly once. Its `Context` stores the route callback passed to `route()`. Define `FakeRoute` with `aborted = False`, async `continue_(**_kwargs)` and async `abort(*_args)` that sets `aborted = True`. For each generated request, async `Page.click()` calls `await context.route_handler(FakeRoute(), request)` before emitting request/response events; if the route was aborted, it emits neither event. `exchange_count` defaults to `1`; the click loop emits exactly `exchange_count` in-scope request/response pairs, each with a distinct URL suffix and the supplied `response_body`. When `off_scope_request=True`, the first generated request URL is `https://outside.example.test/v1/items/RAW_ID_4eC39HqLyjWDarjtT1zdp7dc`, so the stored route callback records a real scope denial. `FakeResponse.body()` returns the supplied bytes and, when `response_body_delay=True`, first awaits `asyncio.sleep(0)`.
+
+Add these tests with the literal sentinels shown:
 
 ```python
 def test_capture_session_writes_sanitized_har_and_keeps_full_values_in_memory(
@@ -378,21 +386,24 @@ def test_capture_session_awaits_response_body_before_returning(
 
 
 @pytest.mark.parametrize(
-    ("body_bytes", "total_bytes", "message"),
+    ("response_body", "exchange_count", "message"),
     [
-        (capture._MAX_FULL_BODY_BYTES + 1, 0, "body"),
-        (16, capture._MAX_FULL_SESSION_BYTES + 1, "session material"),
+        (b"x" * (capture._MAX_FULL_BODY_BYTES + 1), 1, "body"),
+        (b"x" * (capture._MAX_FULL_BODY_BYTES - 1), 26, "session material"),
     ],
 )
 def test_capture_session_fails_closed_at_full_material_limits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    body_bytes: int,
-    total_bytes: int,
+    response_body: bytes,
+    exchange_count: int,
     message: str,
 ) -> None:
     registry, config = _full_session_harness(
-        tmp_path, monkeypatch, response_body=b"x" * body_bytes, extra_state_bytes=total_bytes
+        tmp_path,
+        monkeypatch,
+        response_body=response_body,
+        exchange_count=exchange_count,
     )
     with pytest.raises(CaptureError, match=message):
         asyncio.run(capture.capture_session(config, Guard(), registry=registry))
@@ -400,6 +411,8 @@ def test_capture_session_fails_closed_at_full_material_limits(
     with pytest.raises(RuntimeError, match="registry is closed"):
         registry.store_value(kind="body", value=b"x")
 ```
+
+The second parameter set is deliberately cumulative: every response body is 1 byte below the 1 MiB individual-body limit, the harness's browser storage state stays below 1 MiB, and `26 * (1 MiB - 1)` exceeds the 25 MiB total-material limit. It therefore reaches only `"full capture session material exceeds the safe limit"`, not the individual body or state limits.
 
 - [ ] **Step 2: Run the selected tests to verify they fail**
 
@@ -502,17 +515,30 @@ def test_session_adapter_callback_sees_full_records_but_publishes_only_inventory
     assert {field.name for field in inventory[0].fields} == {"id", "name"}
     assert "FULL_VALUE_SENTINEL" not in repr(inventory)
     assert registry.resolve_value(inventory[0].record_handles[0]) == "RAW_ID_4eC39HqLyjWDarjtT1zdp7dc"
+
+
+def test_session_adapter_callback_rejects_raw_result_escapes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry, config = _full_session_harness(tmp_path, monkeypatch)
+    session = asyncio.run(capture.capture_session(config, Guard(), registry=registry))
+
+    with pytest.raises(CaptureError, match="ResourceInventory tuple"):
+        session.with_adapter_records(lambda records: records[0])  # type: ignore[arg-type]
+    with pytest.raises(CaptureError, match="ResourceInventory tuple"):
+        session.with_adapter_records(lambda records: {"nested": (records[0],)})  # type: ignore[arg-type]
+    assert session.with_adapter_records(lambda _records: ()) == ()
 ```
 
 - [ ] **Step 2: Run the selected tests to verify they fail**
 
 Run: `uv run pytest tests/test_capture.py -k "wrong_registry or scope_failure or adapter_callback" -v`
 
-Expected: FAIL until runtime capability validation, failure cleanup, and `with_adapter_records()` are complete.
+Expected: FAIL until runtime capability validation, failure cleanup, result whitelisting, and `with_adapter_records()` are complete.
 
 - [ ] **Step 3: Harden capability validation and the ephemeral callback**
 
-At the start of `capture_session()`, reject `not isinstance(registry, SessionValueStore)` with `CaptureError("registry must implement SessionValueStore")`. In `with_adapter_records()`, validate that every exchange belongs to the capture, resolve raw materials only after `_require_open()`, create local `RequestRecord` values, invoke `consumer`, and clear the local tuple in a `finally` block. Do not add a public `records`, `raw_records`, `to_records`, `export`, or iterator property.
+At the start of `capture_session()`, before importing Playwright or creating a browser, reject `not isinstance(registry, SessionValueStore)` with `CaptureError("registry must implement SessionValueStore")`. In `with_adapter_records()`, validate that every exchange belongs to the capture, resolve raw materials only after `_require_open()`, create local `RequestRecord` values, invoke `consumer`, whitelist the `tuple[ResourceInventory, ...]` result exactly as Task 2 specifies, and clear the local tuple in a `finally` block. Do not add a public `records`, `raw_records`, `to_records`, `export`, or iterator property.
 
 Preserve `_scoped_route` unchanged. In `_run_scoped_capture()`, call `full_collector.finalize()` only after the page/login flow has completed and before writing any HAR. If `_scoped_route` recorded a failure, close the registry and raise the existing scope error before a session object can be constructed.
 
@@ -659,14 +685,17 @@ def test_reports_reject_session_material_and_emit_no_full_value_sentinel(
 def test_ai_context_from_session_adapter_has_no_full_value_sentinel(
     captured_session_with_sentinels: InSessionCapture,
 ) -> None:
-    context = captured_session_with_sentinels.with_adapter_records(
-        lambda records: {
-            "endpoint_patterns": [
-                {"endpoint_template": "/v1/items/{id}", "allowed_methods": [records[0].method]}
-            ],
-            "candidates": [],
-        }
+    registry = InMemorySessionValueRegistry()
+    inventories = captured_session_with_sentinels.with_adapter_records(
+        GenericAdapter(registry).inventory
     )
+    context = {
+        "endpoint_patterns": [
+            {"endpoint_template": item.endpoint_template, "allowed_methods": sorted(item.observed_methods)}
+            for item in inventories
+        ],
+        "candidates": [],
+    }
     assert b"FULL_VALUE_SENTINEL" not in json.dumps(sanitize_context(context)).encode()
 
 
@@ -685,7 +714,7 @@ def test_mcp_imports_only_sanitized_session_har(
     )
 ```
 
-Import `InSessionCapture` in each test module that uses the fixture. `tests/test_reporting.py` already supplies `_bundle()`, and `tests/test_mcp_server.py` already supplies `_write_scope()`. No raw body, header, cookie, or full `RequestRecord` is written by the fixture's HAR.
+Import `InSessionCapture` in each test module that uses the fixture. In `tests/test_ai.py`, also import `GenericAdapter` and `InMemorySessionValueRegistry`; the adapter's temporary registry is local to the test and its `ResourceInventory` result exposes only safe fields and handles. `tests/test_reporting.py` already supplies `_bundle()`, and `tests/test_mcp_server.py` already supplies `_write_scope()`. No raw body, header, cookie, or full `RequestRecord` is written by the fixture's HAR.
 
 - [ ] **Step 3: Run the new negative tests to establish the current boundary**
 
@@ -749,7 +778,7 @@ The final Task 5 pytest run is the criterion-8 proof when it includes this deter
 
 1. Fake Playwright emits one in-scope `POST` with a bearer-header sentinel, raw request ID, full response ID/value, and browser storage-state cookie sentinel.
 2. `capture_session()` completes one routed browser/context run, returns a handle-only `InSessionCapture`, and resolves the exact response body only while the session remains open.
-3. `with_adapter_records(GenericAdapter(registry).inventory)` observes the raw response body synchronously and returns only field names and `ValueHandle`s; no raw `RequestRecord` is returned or stored.
+3. `with_adapter_records(GenericAdapter(registry).inventory)` observes the raw response body synchronously and returns only a `tuple[ResourceInventory, ...]` containing field names and `ValueHandle`s. Direct and nested raw-record callback returns fail closed; no raw `RequestRecord` is returned or stored.
 4. The session HAR and parsed HAR are scanned and contain none of the three sentinels; response bodies remain absent from parsed HAR records.
 5. State/SQLite sidecars, all report outputs, sanitized AI context, and MCP session records are byte/repr-scanned and contain none of the sentinels.
 6. A scope-denied request and each full-material limit fail before HAR/session return and revoke the registry; `InSessionCapture.close()` also revokes all handles.
@@ -760,7 +789,7 @@ The final Task 5 pytest run is the criterion-8 proof when it includes this deter
 
 **Placeholder scan:** This plan defines every production interface, limit, failure message, test command, test sentinel, and commit command. It contains no deferred implementation markers or cross-task shorthand.
 
-**Type consistency:** `SessionValueStore` is defined in Task 1 and used by Tasks 2–4. `SessionExchange`, `SessionRequestMaterial`, `SessionResponseMaterial`, and `InSessionCapture` are defined in Task 2 and consumed by Tasks 3–5. `capture_session()` is defined in Task 3 and used by Tasks 4–5. The raw-to-provider bridge is only `InSessionCapture.with_adapter_records()` throughout.
+**Type consistency:** `SessionValueStore` is defined in Task 1 and used by Tasks 2–4. `SessionExchange`, `SessionRequestMaterial`, `SessionResponseMaterial`, `InSessionCapture`, and the `tuple[ResourceInventory, ...]` callback result are defined in Task 2 and consumed by Tasks 3–5. `capture_session()` is defined in Task 3 and used by Tasks 4–5. The raw-to-provider bridge is only `InSessionCapture.with_adapter_records()` throughout.
 
 ## Execution handoff
 
