@@ -174,3 +174,11 @@ boundaries. External P11 publication actions remain separately approval-gated.
   acceptance, protocol checks, and deterministic capture→Hasura proof all pass;
   no network path or raw serialization exists. **P4d is complete** across
   Tasks 1–4. P5 BYOK AI planning is the next roadmap gate.
+
+## P5 execution status
+
+- Executable P5 plan committed as `362dcd7`: typed BYOK contracts/context,
+  strict proposal validation, explicit provider-scope HTTP clients, legacy
+  LiteLLM migration, and privacy/redirect/fake-transport acceptance tests.
+- P5 implementation has not started; runtime dependency additions are not
+  expected because existing `httpx` is reused.
