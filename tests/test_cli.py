@@ -5,11 +5,14 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
+import openbola.cli as cli_module
 from openbola import __version__
 from openbola.cli import app
+from openbola.mcp_server import MCPServiceError
 from openbola.mock_target import DEMO_OBJECT_ID, MockTarget
 
 
@@ -297,3 +300,42 @@ def test_admin_commands_and_version_are_registered_without_secrets() -> None:
     assert result.exit_code == 2
     assert json.loads(result.stdout) == {"ok": False, "error": "diagnostics_blocked"}
     assert "SECRET" not in result.stdout
+
+
+def test_mcp_command_starts_renamed_read_only_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeServer:
+        def run(self, **kwargs: object) -> None:
+            calls["run"] = kwargs
+
+    def fake_factory(*, read_only: bool = False) -> FakeServer:
+        calls["read_only"] = read_only
+        return FakeServer()
+
+    monkeypatch.setattr(cli_module, "create_mcp_server", fake_factory)
+
+    result = CliRunner().invoke(app, ["mcp", "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    assert calls == {"read_only": True, "run": {"transport": "stdio"}}
+    assert result.stdout == ""
+
+
+def test_mcp_command_maps_optional_or_transport_failures_to_safe_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_factory(*, read_only: bool = False) -> object:
+        del read_only
+        raise MCPServiceError("MCP_SECRET_SENTINEL local path")
+
+    monkeypatch.setattr(cli_module, "create_mcp_server", fail_factory)
+
+    result = CliRunner().invoke(app, ["mcp", "--json"])
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == {"ok": False, "error": "mcp_unavailable"}
+    assert "MCP_SECRET_SENTINEL" not in result.stdout
+    assert "local path" not in result.stdout

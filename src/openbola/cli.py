@@ -11,6 +11,7 @@ import typer
 from rich.console import Console
 
 from openbola import __version__
+from openbola.mcp_server import MCPServiceError, create_mcp_server
 from openbola.pipeline import IdentityInput, PipelineError, PipelineResult, run_pipeline
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -185,7 +186,14 @@ def mcp_command(
 ) -> None:
     """Start the local read-only MCP server."""
 
-    _emit_command_error("mcp_unavailable", json_output=json_output)
+    try:
+        create_mcp_server(read_only=True).run(transport="stdio")
+    except (ImportError, MCPServiceError, OSError, RuntimeError, ValueError) as error:
+        # Optional transport/import failures are intentionally mapped to one
+        # bounded code; exception text may contain local paths or dependency
+        # details and must never cross the CLI boundary.
+        del error
+        _emit_command_error("mcp_unavailable", json_output=json_output)
 
 
 @app.callback()
