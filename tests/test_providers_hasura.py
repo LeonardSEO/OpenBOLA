@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+from openbola.providers.hasura import (
+    _parse_operation,
+    _ParsedOperation,
+    _resource_name,
+    _RootSelection,
+)
+
+
+def test_parse_query_root_alias_variables_and_selected_fields() -> None:
+    parsed = _parse_operation(
+        "query Get($orderId: uuid!) { order: orders_by_pk(id: $orderId) { id total } }"
+    )
+    assert parsed is not None
+    assert isinstance(parsed, _ParsedOperation)
+    assert parsed.operation_kind == "query"
+    assert parsed.roots == (
+        _RootSelection(
+            field_name="orders_by_pk",
+            variable_names=frozenset({"orderId"}),
+            selected_fields=frozenset({"id", "total"}),
+            mutation_returning_fields=frozenset(),
+        ),
+    )
+    assert _resource_name("orders_by_pk") == "orders"
+
+
+def test_parse_mutation_uses_returning_fields_not_wrapper_fields() -> None:
+    parsed = _parse_operation(
+        "mutation Update($id: uuid!, $name: String!) { "
+        "update_orders(where: {id: {_eq: $id}}, _set: {name: $name}) "
+        "{ affected_rows returning { id name } } }"
+    )
+    assert parsed is not None
+    root = parsed.roots[0]
+    assert parsed.operation_kind == "mutation"
+    assert root.field_name == "update_orders"
+    assert root.variable_names == frozenset({"id", "name"})
+    assert root.selected_fields == frozenset({"affected_rows", "returning"})
+    assert root.mutation_returning_fields == frozenset({"id", "name"})
+    assert _resource_name(root.field_name) == "orders"
+
+
+def test_parse_ignores_variable_lookalikes_in_comments_and_strings() -> None:
+    assert _parse_operation("# $fake\nquery { orders { note } }") is not None
+    assert _parse_operation('query { orders { note(format: "$fake") } }') is not None
+    assert _parse_operation("fragment OrderFields on orders { id }") is None
+    assert _parse_operation("query { __schema { types { name } } }") is None
