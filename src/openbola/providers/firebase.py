@@ -20,10 +20,12 @@ separately.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from openbola.discovery import (
     FieldInventory,
+    ProviderAdapter,
     ProviderConfidence,
     ProviderDetection,
     ResourceInventory,
@@ -126,3 +128,14 @@ class FirebaseRealtimeDatabaseAdapter:
                 )
             )
         return tuple(inventories)
+
+
+if TYPE_CHECKING:
+
+    def _firebase_rtdb_adapter_satisfies_provider_adapter(
+        registry: InMemorySessionValueRegistry,
+    ) -> ProviderAdapter:
+        """Static-only check: mypy fails here if FirebaseRealtimeDatabaseAdapter drifts from
+        the Protocol.
+        """
+        return FirebaseRealtimeDatabaseAdapter(registry)
