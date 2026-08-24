@@ -209,3 +209,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   delegates through typed contracts while preserving a deprecation shim and
   no target execution. AI tests: 66 passed; Ruff/mypy green. Independent review
   is pending.
+- P5 Task 4 independently approved. Obsolete `litellm` optional extra and its
+  lockfile graph were removed in `454b7c2`; typed compatibility shim remains
+  deprecation-safe and non-executing. AI tests 66 passed with Ruff/mypy. P5
+  Task 5 is the final acceptance/roadmap update gate.
