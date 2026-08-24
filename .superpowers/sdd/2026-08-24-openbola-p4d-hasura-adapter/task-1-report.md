@@ -37,3 +37,13 @@
 - Rejected empty/trailing argument values and numeric tokens with identifier
   suffixes, with explicit regression tests for the reviewer examples.
 - Revalidated parser tests (5 passed), Ruff, and strict mypy.
+
+## Review fix 2
+
+- Added parenthesized argument/directive grammar validation for required
+  name/variable-colon-value pairs, malformed values, and dangling commas.
+- Preserved nested GraphQL object/list values while rejecting mismatched delimiters
+  and malformed numeric tokens.
+- Added a selection-depth budget so deeply nested documents fail closed instead of
+  reaching Python recursion limits.
+- Revalidated parser tests (7 passed), Ruff, and strict mypy.

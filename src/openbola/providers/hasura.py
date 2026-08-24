@@ -40,6 +40,7 @@ _NUMBER_RE = re.compile(
 _PUNCTUATION = frozenset("!$():=@[]{|}&")
 _OPEN_DELIMITERS = {"(": ")", "[": "]", "{": "}"}
 _CLOSE_DELIMITERS = frozenset(_OPEN_DELIMITERS.values())
+_MAX_PARSE_DEPTH = 128
 
 
 def _lex(document: str) -> tuple[_Token, ...] | None:
@@ -55,7 +56,7 @@ def _lex(document: str) -> tuple[_Token, ...] | None:
     length = len(document)
     while index < length:
         character = document[index]
-        if character.isspace() or character == ",":
+        if character.isspace():
             index += 1
             continue
         if character == "#":
@@ -111,7 +112,7 @@ def _lex(document: str) -> tuple[_Token, ...] | None:
             tokens.append(_Token("literal"))
             index = number.end()
             continue
-        if character in _PUNCTUATION:
+        if character == "," or character in _PUNCTUATION:
             tokens.append(_Token("punctuation", character))
             index += 1
             continue
@@ -146,9 +147,75 @@ def _consume_balanced(
                 inner = tokens[start:cursor]
                 if not inner or inner[-1].value == ":":
                     return None
+                if not _validate_argument_tokens(inner):
+                    return None
                 return inner, cursor + 1
         cursor += 1
     return None
+
+
+def _parse_value(tokens: tuple[_Token, ...], index: int, depth: int = 0) -> int | None:
+    """Consume one GraphQL value/type without retaining its contents."""
+
+    if depth > _MAX_PARSE_DEPTH or index >= len(tokens):
+        return None
+    token = tokens[index]
+    if token.kind in {"name", "variable", "string", "literal"}:
+        cursor = index + 1
+        if token.kind == "name" and _is(tokens, cursor, "punctuation", "!"):
+            cursor += 1
+        return cursor
+    if token.kind != "punctuation" or token.value not in {"[", "{"}:
+        return None
+    closing = "]" if token.value == "[" else "}"
+    cursor = index + 1
+    if _is(tokens, cursor, "punctuation", closing):
+        return cursor + 1
+    while cursor < len(tokens):
+        if token.value == "{":
+            if not _is(tokens, cursor, "name"):
+                return None
+            cursor += 1
+            if not _is(tokens, cursor, "punctuation", ":"):
+                return None
+            cursor += 1
+        value_end = _parse_value(tokens, cursor, depth + 1)
+        if value_end is None:
+            return None
+        cursor = value_end
+        if _is(tokens, cursor, "punctuation", ","):
+            cursor += 1
+            if _is(tokens, cursor, "punctuation", closing):
+                return None
+        if _is(tokens, cursor, "punctuation", closing):
+            return cursor + 1
+        # Commas are optional in GraphQL, so adjacent values/object fields are
+        # accepted when the next token starts another value or object field.
+    return None
+
+
+def _validate_argument_tokens(tokens: tuple[_Token, ...]) -> bool:
+    if not tokens:
+        return False
+    cursor = 0
+    while cursor < len(tokens):
+        if not _is(tokens, cursor, "name") and not _is(tokens, cursor, "variable"):
+            return False
+        cursor += 1
+        if not _is(tokens, cursor, "punctuation", ":"):
+            return False
+        cursor += 1
+        value_end = _parse_value(tokens, cursor)
+        if value_end is None:
+            return False
+        cursor = value_end
+        if cursor == len(tokens):
+            return True
+        if _is(tokens, cursor, "punctuation", ","):
+            cursor += 1
+            if cursor == len(tokens):
+                return False
+    return cursor == len(tokens)
 
 
 def _variables(tokens: tuple[_Token, ...]) -> frozenset[str]:
@@ -170,7 +237,7 @@ def _skip_directives(tokens: tuple[_Token, ...], index: int) -> int | None:
     return cursor
 
 
-def _skip_spread(tokens: tuple[_Token, ...], index: int) -> int | None:
+def _skip_spread(tokens: tuple[_Token, ...], index: int, depth: int = 0) -> int | None:
     """Consume a fragment spread or inline fragment without retaining its names."""
 
     cursor = index + 1
@@ -186,7 +253,7 @@ def _skip_spread(tokens: tuple[_Token, ...], index: int) -> int | None:
         return None
     cursor = next_cursor
     if _is(tokens, cursor, "punctuation", "{"):
-        parsed = _parse_selection_set(tokens, cursor)
+        parsed = _parse_selection_set(tokens, cursor, depth + 1)
         if parsed is None:
             return None
         _, _, cursor = parsed
@@ -194,16 +261,19 @@ def _skip_spread(tokens: tuple[_Token, ...], index: int) -> int | None:
 
 
 def _parse_selection_set(
-    tokens: tuple[_Token, ...], index: int
+    tokens: tuple[_Token, ...], index: int, depth: int = 0
 ) -> tuple[frozenset[str], frozenset[str], int] | None:
-    if not _is(tokens, index, "punctuation", "{"):
+    if depth > _MAX_PARSE_DEPTH or not _is(tokens, index, "punctuation", "{"):
         return None
     cursor = index + 1
     selected: set[str] = set()
     returning: set[str] = set()
     while cursor < len(tokens) and not _is(tokens, cursor, "punctuation", "}"):
+        if _is(tokens, cursor, "punctuation", ","):
+            cursor += 1
+            continue
         if _is(tokens, cursor, "punctuation", "..."):
-            next_cursor = _skip_spread(tokens, cursor)
+            next_cursor = _skip_spread(tokens, cursor, depth)
             if next_cursor is None:
                 return None
             cursor = next_cursor
@@ -229,7 +299,7 @@ def _parse_selection_set(
         cursor = next_cursor
         child_fields: frozenset[str] = frozenset()
         if _is(tokens, cursor, "punctuation", "{"):
-            parsed = _parse_selection_set(tokens, cursor)
+            parsed = _parse_selection_set(tokens, cursor, depth + 1)
             if parsed is None:
                 return None
             child_fields, _, cursor = parsed
@@ -249,6 +319,9 @@ def _parse_root_selection_set(
     cursor = index + 1
     roots: list[_RootSelection] = []
     while cursor < len(tokens) and not _is(tokens, cursor, "punctuation", "}"):
+        if _is(tokens, cursor, "punctuation", ","):
+            cursor += 1
+            continue
         if _is(tokens, cursor, "punctuation", "..."):
             next_cursor = _skip_spread(tokens, cursor)
             if next_cursor is None:

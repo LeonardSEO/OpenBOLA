@@ -57,3 +57,21 @@ def test_parse_rejects_mismatched_or_empty_argument_delimiters() -> None:
 
 def test_parse_rejects_numeric_tokens_with_identifier_suffixes() -> None:
     assert _parse_operation("query { orders(limit: 123abc) { id } }") is None
+
+
+def test_parse_rejects_malformed_argument_and_directive_grammar() -> None:
+    malformed = (
+        "where = 1",
+        "where",
+        "where:: 1",
+        "where: foo bar",
+        "where: 1,",
+    )
+    for argument in malformed:
+        assert _parse_operation(f"query {{ orders({argument}) {{ id }} }}") is None
+    assert _parse_operation("query { orders @skip(if: ) { id } }") is None
+
+
+def test_parse_fails_closed_before_python_recursion_limit() -> None:
+    nested = "query { orders " + "{ child " * 140 + "id" + " }" * 140 + " }"
+    assert _parse_operation(nested) is None
