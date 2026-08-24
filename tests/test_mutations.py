@@ -258,3 +258,22 @@ def test_executor_facade_only_preflights_and_does_not_dispatch(tmp_path: Path) -
     executor = MutationSweepExecutor(guard)
     plan = executor.preflight((_candidate(),), now=NOW)
     assert plan.request_count == 5
+
+
+def test_runtime_mutation_material_is_redacted_and_not_serializable(tmp_path: Path) -> None:
+    import pickle
+
+    guard = _guard(tmp_path, record_scope="explicit")
+    candidate = _candidate(object_id="SECRET-OBJECT")
+    object.__setattr__(candidate, "canary_value", "SECRET-CANARY")
+    object.__setattr__(candidate.target.owner_credential, "secret_ref", "SECRET-CREDENTIAL")
+    plan = preflight_sweep((candidate,), guard, now=NOW)
+
+    rendered = repr(plan)
+    assert "SECRET-OBJECT" not in rendered
+    assert "SECRET-CANARY" not in rendered
+    assert "SECRET-CREDENTIAL" not in rendered
+    with pytest.raises(TypeError, match="cannot be serialized"):
+        pickle.dumps(candidate)
+    with pytest.raises(TypeError, match="cannot be serialized"):
+        pickle.dumps(plan)

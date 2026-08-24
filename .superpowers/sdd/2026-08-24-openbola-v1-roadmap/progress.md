@@ -229,3 +229,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   AES-GCM journal, OS-vault checkpoint, startup recovery gate, and append-only
   manual escalation. Cryptography/vault dependency changes remain an explicit
   implementation checkpoint; no P6 product code has started.
+- P6 Task 1 implementation is committed as `de0421c`: immutable mutation
+  candidates/operations/inventory/plan/outcome and strict all-record preflight
+  with exact grant/scope/budget checks. Fourteen mutation tests passed; Ruff
+  and strict mypy are green. Independent review is pending.

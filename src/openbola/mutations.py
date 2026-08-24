@@ -13,8 +13,9 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime
-from typing import Literal, TypeAlias
+from typing import Literal, NoReturn, SupportsIndex, TypeAlias
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from openbola.handles import ValueHandle
@@ -72,11 +73,21 @@ class MutationCandidate:
     record_handle: str
     owner_identity_handle: str
     attacker_identity_handle: str
-    target: ProbeTarget
+    target: ProbeTarget = dataclass_field(repr=False)
     field: str
-    original_value: ValueHandle
-    canary_value: str
+    original_value: ValueHandle = dataclass_field(repr=False)
+    canary_value: str = dataclass_field(repr=False)
     mutation: MutationOperation
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError("Mutation candidates are process-local and cannot be serialized.")
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> NoReturn:
+        del protocol
+        raise TypeError("Mutation candidates are process-local and cannot be serialized.")
+
+    def __getstate__(self) -> NoReturn:
+        raise TypeError("Mutation candidates are process-local and cannot be serialized.")
 
     def __post_init__(self) -> None:
         for value, label in (
