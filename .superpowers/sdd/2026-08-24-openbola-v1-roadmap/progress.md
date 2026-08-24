@@ -236,3 +236,12 @@ boundaries. External P11 publication actions remain separately approval-gated.
 - P6 Task 1 redaction fix is in `a0d08b0`: runtime target/canary/credential
   material is omitted from repr and plan/candidate pickling fails closed.
   Re-review approved; 15 focused tests and full 490-suite regression pass.
+- P6 Task 2 implementation is committed as `5b13b52`, with executor metadata
+  coverage in `4bee740`. It adds the single guarded `request_scoped` primitive
+  and deterministic snapshot → canary → unauthorized verify → restore →
+  restore verify sweep, with cancellation-safe cleanup and global stop on
+  unverified restoration. Review fixes `d922480`/`ad99830` normalize opaque
+  handle generation, reject query/fragment endpoint smuggling, and export the
+  bounded exchange type. Scope provenance is exposed by `c1e9e36` for the
+  in-process plan boundary. Independent review approved Task 2: 58 focused
+  tests, 60 repeated sweep runs, full pytest 495, Ruff and strict mypy pass.
