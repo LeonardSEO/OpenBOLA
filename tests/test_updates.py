@@ -622,3 +622,30 @@ def test_archive_members_and_adjacent_manifest_are_verified_before_replace(
     )
     assert result.reason_code == reason
     assert executable.read_bytes() == before
+
+
+def test_runtime_archive_reader_failure_is_bounded_and_preserves_executable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = _executable(tmp_path)
+    transport, _ = _transport(_release_payload())
+    before = executable.read_bytes()
+
+    def fail_reader(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("encrypted archive secret sentinel")
+
+    monkeypatch.setattr("openbola.updates.tarfile.open", fail_reader)
+    result = apply_update(
+        confirm=True,
+        current_version=CURRENT,
+        data_root=tmp_path / "state",
+        executable=executable,
+        transport=transport,
+        scope_guard=_scope_guard(tmp_path),
+        system="darwin",
+        machine="arm64",
+    )
+    assert result.reason_code == "archive_invalid"
+    assert executable.read_bytes() == before
+    assert "encrypted archive secret sentinel" not in repr(result)

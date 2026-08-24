@@ -764,7 +764,7 @@ def _extract_verified_archive(
     except UpdateError:
         shutil.rmtree(extraction, ignore_errors=True)
         raise
-    except (OSError, tarfile.TarError, zipfile.BadZipFile, ValueError) as error:
+    except (OSError, RuntimeError, tarfile.TarError, zipfile.BadZipFile, ValueError) as error:
         shutil.rmtree(extraction, ignore_errors=True)
         raise UpdateError("archive_invalid") from error
 def _replace_from_temp(temporary: Path, executable: Path) -> None:
