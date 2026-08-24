@@ -150,3 +150,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   argument/directive grammar, depth bounds, and valid variable definitions.
   Final review approved: 8 parser tests passed with Ruff and strict mypy.
   Task 2 may begin.
+- P4d Task 2 implementation is committed as `f0fd64b`: Hasura detection,
+  origin-gated inventory, query/body helpers, and mutation-returning handling.
+  Implementer reports 13 parser/provider tests plus targeted checks green;
+  independent review is pending.
