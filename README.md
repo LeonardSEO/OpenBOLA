@@ -283,7 +283,8 @@ validated against observed handles, methods, fields, and scope and are never
 executable requests. AI has no target-network access: all target traffic is
 sent only by the deterministic, ScopeGuard-enforced executor after the local
 operator reviews the typed plan. Provider credentials remain in the local
-vault and resolved values never enter the model context.
+vault and resolved values never enter the model context. AI may not send network traffic,
+execute a probe, or change a scope or write grant.
 
 `openbola mcp` exposes the service through an optional local stdio FastMCP
 adapter. Its tool arguments accept paths, identities, and environment-variable

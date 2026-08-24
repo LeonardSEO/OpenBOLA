@@ -126,6 +126,7 @@ def test_readme_launch_contract_is_complete_and_secret_free() -> None:
         "restore",
         "AI",
         "no target-network access",
+        "AI may not send network traffic",
         "append-only",
         "no telemetry",
     ):
