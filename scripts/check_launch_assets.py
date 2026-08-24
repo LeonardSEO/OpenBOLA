@@ -39,7 +39,8 @@ def validate_asset(path: Path, *, kind: AssetKind) -> None:
         if not raw or len(raw) > MAX_ASSET_BYTES:
             _fail()
         root = ET.fromstring(raw)  # noqa: S314 - bounded, local SVG with external URLs rejected below
-    except (OSError, ET.ParseError, ValueError):
+        text = raw.decode("utf-8", errors="strict")
+    except (OSError, ET.ParseError, UnicodeDecodeError, ValueError):
         raise ValueError(_ERROR) from None
 
     if root.tag != f"{{{_SVG_NAMESPACE}}}svg":
@@ -58,7 +59,6 @@ def validate_asset(path: Path, *, kind: AssetKind) -> None:
     ):
         _fail()
 
-    text = raw.decode("utf-8", errors="strict")
     if any(marker in text.casefold() for marker in _FORBIDDEN_TEXT):
         _fail()
     if any(f"<{tag}" in text.casefold() for tag in _NAV_TAGS):
