@@ -267,3 +267,9 @@ boundaries. External P11 publication actions remain separately approval-gated.
   publication was aligned with CLI/E2E/reporting assertions and sixth-write
   failure leaves no destination or staging directory. Task 4 is approved by
   the full 503-test regression; P7 Task 5 acceptance/roadmap gate remains.
+- P7 Task 5 is complete in `8ae388c`: cross-phase sentinel acceptance covers
+  ValueHandle capture, StateStore, canonical documents, repr/asdict/pickle,
+  all six renderers, and atomic persisted artifacts. It also proves legacy
+  evidence cannot infer mutation proof. Independent review approved the gate:
+  37 focused tests, full pytest 505, Ruff, and strict mypy pass. **P7 is
+  complete across Tasks 1–5.**
