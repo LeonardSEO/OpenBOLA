@@ -158,3 +158,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   malformed fail-closed parsing, safe inventories, and mutation returning are
   covered; targeted tests/Ruff/mypy passed. Task 3 (variable association and
   sensitive-ID guards) may begin.
+- P4d Task 3 implementation is committed as `a87c4ea`: guarded variable
+  association, opaque record handles, and sensitive/operator/parent guards.
+  Implementer reports targeted 9 and full Hasura 17 tests green; independent
+  review is pending.
