@@ -31,11 +31,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ai = ["litellm>=1.50,<2"]
 mcp = ["fastmcp>=2,<4"]
 capture = ["playwright>=1.48,<2"]
 all = [
-  "litellm>=1.50,<2",
   "fastmcp>=2,<4",
   "playwright>=1.48,<2",
 ]
