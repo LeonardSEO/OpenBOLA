@@ -221,3 +221,11 @@ boundaries. External P11 publication actions remain separately approval-gated.
   MockTransport-only boundary, payload privacy, proposal binding rejection, and
   registry close proof all pass. **P5 is complete** across Tasks 1–5; P6
   mutation/recovery planning is next.
+
+## P6 execution status
+
+- Executable P6 plan committed as `e70b8fe`: all-record immutable preflight,
+  scoped executor-only writes, snapshot/canary/verify/restore state machine,
+  AES-GCM journal, OS-vault checkpoint, startup recovery gate, and append-only
+  manual escalation. Cryptography/vault dependency changes remain an explicit
+  implementation checkpoint; no P6 product code has started.
