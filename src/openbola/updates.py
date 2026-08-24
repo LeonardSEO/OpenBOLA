@@ -101,6 +101,7 @@ _ASSET_KEYS: Final = frozenset(
         "download_count",
         "created_at",
         "updated_at",
+        "digest",
         "browser_download_url",
     }
 )
