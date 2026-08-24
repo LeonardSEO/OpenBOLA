@@ -22,9 +22,12 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlsplit
 
-from openbola.endpoints import extract_object_ids, is_object_id, templatize
+from openbola.endpoints import _walk_json_ids, extract_object_ids, is_object_id, templatize
 from openbola.handles import InMemorySessionValueRegistry, ValueHandle
 from openbola.models import RequestRecord
+
+if TYPE_CHECKING:
+    from openbola.capture import AdapterRecordView
 
 
 class ProviderConfidence(StrEnum):
@@ -59,8 +62,33 @@ class ProviderAdapter(Protocol):
     @property
     def name(self) -> str: ...
 
-    def detect(self, records: Sequence[RequestRecord]) -> ProviderDetection: ...
-    def inventory(self, records: Sequence[RequestRecord]) -> tuple[ResourceInventory, ...]: ...
+    def detect(self, records: Sequence[AdapterRecordView]) -> ProviderDetection: ...
+    def inventory(self, records: Sequence[AdapterRecordView]) -> tuple[ResourceInventory, ...]: ...
+
+
+def adapter_record(view: AdapterRecordView | RequestRecord) -> RequestRecord:
+    """Return the sanitized record carried by an ephemeral adapter view.
+
+    RequestRecord input remains accepted at runtime for compatibility with the
+    pre-session discovery callers. New capture-to-provider paths pass only
+    ``AdapterRecordView`` values, whose raw bodies are deliberately handled by
+    the owning adapter rather than copied into the persistent record.
+    """
+    if isinstance(view, RequestRecord):
+        return view
+    return view.record
+
+
+def adapter_request_body(view: AdapterRecordView | RequestRecord) -> bytes | None:
+    if isinstance(view, RequestRecord):
+        return view.body
+    return view.request_body
+
+
+def adapter_response_body(view: AdapterRecordView | RequestRecord) -> bytes | None:
+    if isinstance(view, RequestRecord):
+        return view.response_body
+    return view.response_body
 
 
 class GenericAdapter:
@@ -71,30 +99,37 @@ class GenericAdapter:
     def __init__(self, registry: InMemorySessionValueRegistry) -> None:
         self._registry = registry
 
-    def detect(self, records: Sequence[RequestRecord]) -> ProviderDetection:
+    def detect(self, records: Sequence[AdapterRecordView]) -> ProviderDetection:
         del records
         return ProviderDetection(provider="generic", confidence=ProviderConfidence.UNKNOWN)
 
-    def inventory(self, records: Sequence[RequestRecord]) -> tuple[ResourceInventory, ...]:
-        groups: dict[tuple[str, str], list[RequestRecord]] = {}
-        for record in records:
+    def inventory(self, records: Sequence[AdapterRecordView]) -> tuple[ResourceInventory, ...]:
+        groups: dict[tuple[str, str], list[AdapterRecordView | RequestRecord]] = {}
+        for candidate in records:
+            record = adapter_record(candidate)
             split = urlsplit(record.url)
             origin = f"{split.scheme}://{split.netloc}"
             template = templatize(record.url)
-            groups.setdefault((origin, template), []).append(record)
+            groups.setdefault((origin, template), []).append(candidate)
 
         inventories: list[ResourceInventory] = []
         for origin, template in sorted(groups):
             group = groups[(origin, template)]
-            methods = frozenset(record.method.upper() for record in group)
+            methods = frozenset(adapter_record(view).method.upper() for view in group)
 
             field_names: set[str] = set()
             object_ids: set[str] = set()
-            for record in group:
-                for key in top_level_json_keys(record.body):
+            for member in group:
+                record = adapter_record(member)
+                request_body = adapter_request_body(member)
+                response_body = adapter_response_body(member)
+                for key in top_level_json_keys(request_body):
                     classify_key(key, field_names, object_ids)
-                for key in top_level_json_keys(record.response_body):
+                for key in top_level_json_keys(response_body):
                     classify_key(key, field_names, object_ids)
+                if not isinstance(member, RequestRecord):
+                    object_ids.update(_body_object_ids(request_body))
+                    object_ids.update(_body_object_ids(response_body))
                 object_ids.update(extract_object_ids(record.url))
 
             fields = tuple(FieldInventory(name=name) for name in sorted(field_names))
@@ -149,6 +184,16 @@ def top_level_json_keys(body: bytes | None) -> set[str]:
                 keys.update(key for key in item if isinstance(key, str))
         return keys
     return set()
+
+
+def _body_object_ids(body: bytes | None) -> set[str]:
+    if body is None:
+        return set()
+    try:
+        decoded: Any = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        return set()
+    return {value for value, _field, _pointer in _walk_json_ids(decoded)}
 
 
 def _resource_name_from_template(template: str) -> str:

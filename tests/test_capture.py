@@ -1261,6 +1261,62 @@ def test_capture_session_fails_closed_at_full_material_limits(
         registry.store_value(kind="body", value=b"x")
 
 
+def test_capture_session_rejects_wrong_registry_capability(tmp_path: Path) -> None:
+    from openbola import capture
+
+    config = make_config(tmp_path)
+    with pytest.raises(CaptureError, match="SessionValueStore"):
+        asyncio.run(capture.capture_session(config, Guard(), registry=object()))  # type: ignore[arg-type]
+
+
+def test_capture_session_scope_failure_returns_no_full_material(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbola import capture
+
+    registry, config = _full_session_harness(tmp_path, monkeypatch, off_scope_request=True)
+    guard = make_scope_guard(
+        tmp_path, allowed_hosts=["api.example.test"], allowed_cidrs=["203.0.113.0/24"]
+    )
+    with pytest.raises(CaptureError, match="confirmed scope"):
+        asyncio.run(capture.capture_session(config, guard, registry=registry))
+    assert not (config.capture_root / config.output_path).exists()
+    with pytest.raises(RuntimeError, match="registry is closed"):
+        registry.store_value(kind="body", value=b"x")
+
+
+def test_session_adapter_callback_sees_full_records_but_publishes_only_inventory_handles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbola import capture
+    from openbola.discovery import GenericAdapter
+
+    registry, config = _full_session_harness(tmp_path, monkeypatch)
+    session = asyncio.run(capture.capture_session(config, Guard(), registry=registry))
+    inventory = session.with_adapter_records(GenericAdapter(registry).inventory)
+
+    assert {field.name for field in inventory[0].fields} == {"id", "name"}
+    assert "FULL_VALUE_SENTINEL" not in repr(inventory)
+    assert "RAW_ID_4eC39HqLyjWDarjtT1zdp7dc" in {
+        registry.resolve_value(handle) for handle in inventory[0].record_handles
+    }
+
+
+def test_session_adapter_callback_rejects_raw_result_escapes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbola import capture
+
+    registry, config = _full_session_harness(tmp_path, monkeypatch)
+    session = asyncio.run(capture.capture_session(config, Guard(), registry=registry))
+
+    with pytest.raises(CaptureError, match="ResourceInventory tuple"):
+        session.with_adapter_records(lambda records: records[0])  # type: ignore[arg-type]
+    with pytest.raises(CaptureError, match="ResourceInventory tuple"):
+        session.with_adapter_records(lambda records: {"nested": (records[0],)})  # type: ignore[arg-type]
+    assert session.with_adapter_records(lambda _records: ()) == ()
+
+
 def test_capture_har_performs_automated_login(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -21,7 +21,7 @@ per function name, not collapsed together -- each function gets its own
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qsl, urlsplit
 
 from openbola.discovery import (
@@ -30,12 +30,18 @@ from openbola.discovery import (
     ProviderConfidence,
     ProviderDetection,
     ResourceInventory,
+    adapter_record,
+    adapter_request_body,
+    adapter_response_body,
     classify_key,
     top_level_json_keys,
 )
 from openbola.endpoints import _is_sensitive_field, is_object_id
 from openbola.handles import InMemorySessionValueRegistry
 from openbola.models import RequestRecord
+
+if TYPE_CHECKING:
+    from openbola.capture import AdapterRecordView
 
 _REST_PREFIX = "/rest/v1/"
 _EQ_OPERATOR = "eq."
@@ -98,10 +104,11 @@ class SupabaseAdapter:
     def __init__(self, registry: InMemorySessionValueRegistry) -> None:
         self._registry = registry
 
-    def detect(self, records: Sequence[RequestRecord]) -> ProviderDetection:
+    def detect(self, records: Sequence[AdapterRecordView]) -> ProviderDetection:
         confirmed = False
         inferred = False
-        for record in records:
+        for view in records:
+            record = adapter_record(view)
             split = urlsplit(record.url)
             if not _is_rest_path(split.path):
                 if _has_postgrest_operator(split.query):
@@ -117,9 +124,10 @@ class SupabaseAdapter:
             return ProviderDetection(provider="supabase", confidence=ProviderConfidence.INFERRED)
         return ProviderDetection(provider="supabase", confidence=ProviderConfidence.UNKNOWN)
 
-    def inventory(self, records: Sequence[RequestRecord]) -> tuple[ResourceInventory, ...]:
-        groups: dict[tuple[str, str], list[RequestRecord]] = {}
-        for record in records:
+    def inventory(self, records: Sequence[AdapterRecordView]) -> tuple[ResourceInventory, ...]:
+        groups: dict[tuple[str, str], list[AdapterRecordView | RequestRecord]] = {}
+        for view in records:
+            record = adapter_record(view)
             split = urlsplit(record.url)
             if not _is_rest_path(split.path):
                 continue
@@ -127,20 +135,21 @@ class SupabaseAdapter:
             if table is None:
                 continue
             origin = f"{split.scheme}://{split.netloc}"
-            groups.setdefault((origin, table), []).append(record)
+            groups.setdefault((origin, table), []).append(view)
 
         inventories: list[ResourceInventory] = []
         for origin, table in sorted(groups):
             group = groups[(origin, table)]
-            confidence = self.detect(group).confidence
-            methods = frozenset(record.method.upper() for record in group)
+            confidence = self.detect(cast(Sequence[Any], group)).confidence
+            methods = frozenset(adapter_record(view).method.upper() for view in group)
 
             field_names: set[str] = set()
             object_ids: set[str] = set()
-            for record in group:
-                for key in top_level_json_keys(record.body):
+            for member in group:
+                record = adapter_record(member)
+                for key in top_level_json_keys(adapter_request_body(member)):
                     classify_key(key, field_names, object_ids)
-                for key in top_level_json_keys(record.response_body):
+                for key in top_level_json_keys(adapter_response_body(member)):
                     classify_key(key, field_names, object_ids)
                 query = urlsplit(record.url).query
                 for param_name, value in parse_qsl(query, keep_blank_values=True):

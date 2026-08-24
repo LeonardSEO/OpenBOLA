@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
 from openbola.discovery import (
@@ -42,12 +42,18 @@ from openbola.discovery import (
     ProviderDetection,
     ResourceInventory,
     _resource_name_from_template,
+    adapter_record,
+    adapter_request_body,
+    adapter_response_body,
     classify_key,
     top_level_json_keys,
 )
 from openbola.endpoints import _is_sensitive_field, _path_ids, is_object_id, templatize
 from openbola.handles import InMemorySessionValueRegistry
 from openbola.models import RequestRecord
+
+if TYPE_CHECKING:
+    from openbola.capture import AdapterRecordView
 
 _JSON_SUFFIX = ".json"
 _RTDB_HOST_SUFFIXES = (".firebaseio.com", ".firebasedatabase.app")
@@ -77,12 +83,14 @@ def _non_sensitive_object_ids(path: str) -> list[str]:
     return ids
 
 
-def _push_id_from_create_response(record: RequestRecord) -> str | None:
+def _push_id_from_create_response(
+    record: RequestRecord, response_body: bytes | None
+) -> str | None:
     """RTDB's push-create envelope (``{"name": "<new-id>"}``) is not a data field."""
-    if record.method.upper() != "POST" or record.response_body is None:
+    if record.method.upper() != "POST" or response_body is None:
         return None
     try:
-        decoded = json.loads(record.response_body)
+        decoded = json.loads(response_body)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         return None
     if not isinstance(decoded, Mapping):
@@ -101,10 +109,11 @@ class FirebaseRealtimeDatabaseAdapter:
     def __init__(self, registry: InMemorySessionValueRegistry) -> None:
         self._registry = registry
 
-    def detect(self, records: Sequence[RequestRecord]) -> ProviderDetection:
+    def detect(self, records: Sequence[AdapterRecordView]) -> ProviderDetection:
         confirmed = False
         inferred = False
-        for record in records:
+        for view in records:
+            record = adapter_record(view)
             split = urlsplit(record.url)
             host_match = _is_rtdb_host(split.hostname)
             json_match = split.path.endswith(_JSON_SUFFIX)
@@ -123,9 +132,10 @@ class FirebaseRealtimeDatabaseAdapter:
             )
         return ProviderDetection(provider="firebase-rtdb", confidence=ProviderConfidence.UNKNOWN)
 
-    def inventory(self, records: Sequence[RequestRecord]) -> tuple[ResourceInventory, ...]:
-        groups: dict[tuple[str, str], list[RequestRecord]] = {}
-        for record in records:
+    def inventory(self, records: Sequence[AdapterRecordView]) -> tuple[ResourceInventory, ...]:
+        groups: dict[tuple[str, str], list[AdapterRecordView | RequestRecord]] = {}
+        for view in records:
+            record = adapter_record(view)
             split = urlsplit(record.url)
             if not _is_rtdb_host(split.hostname):
                 continue
@@ -135,24 +145,26 @@ class FirebaseRealtimeDatabaseAdapter:
             template = templatize(stripped)
             port_suffix = f":{split.port}" if split.port else ""
             origin = f"{split.scheme}://{split.hostname}{port_suffix}"
-            groups.setdefault((origin, template), []).append(record)
+            groups.setdefault((origin, template), []).append(view)
 
         inventories: list[ResourceInventory] = []
         for origin, template in sorted(groups):
             group = groups[(origin, template)]
-            confidence = self.detect(group).confidence
-            methods = frozenset(record.method.upper() for record in group)
+            confidence = self.detect(cast(Sequence[Any], group)).confidence
+            methods = frozenset(adapter_record(view).method.upper() for view in group)
 
             field_names: set[str] = set()
             object_ids: set[str] = set()
-            for record in group:
-                for key in top_level_json_keys(record.body):
+            for member in group:
+                record = adapter_record(member)
+                for key in top_level_json_keys(adapter_request_body(member)):
                     classify_key(key, field_names, object_ids)
 
-                push_id = _push_id_from_create_response(record)
+                response_body = adapter_response_body(member)
+                push_id = _push_id_from_create_response(record, response_body)
                 if push_id is not None:
                     object_ids.add(push_id)
-                for key in top_level_json_keys(record.response_body):
+                for key in top_level_json_keys(response_body):
                     if push_id is not None and key == _PUSH_ID_ENVELOPE_KEY:
                         continue
                     classify_key(key, field_names, object_ids)

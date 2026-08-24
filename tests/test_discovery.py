@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+
+from openbola.capture import AdapterRecordView
 from openbola.discovery import (
     FieldInventory,
     ProviderAdapter,
@@ -294,3 +297,28 @@ def test_generic_adapter_normalizes_method_case() -> None:
     inventories = adapter.inventory(records)
     assert len(inventories) == 1
     assert inventories[0].observed_methods == frozenset({"GET"})
+
+
+def test_generic_adapter_reads_raw_bodies_only_from_ephemeral_adapter_view() -> None:
+    from openbola.discovery import GenericAdapter
+
+    registry = InMemorySessionValueRegistry()
+    adapter = GenericAdapter(registry)
+    safe_record = _record(
+        "POST",
+        "https://api.example.test/v1/items/[REDACTED]",
+        body=b'{"id":"[REDACTED]"}',
+        response_body=b'{"id":"[REDACTED]","name":"[REDACTED]"}',
+    )
+    view = AdapterRecordView(
+        record=safe_record,
+        request_body=json.dumps({"id": "42"}).encode(),
+        response_body=json.dumps({"id": "42", "name": "Widget"}).encode(),
+    )
+
+    inventories = adapter.inventory((view,))
+
+    assert {field.name for field in inventories[0].fields} == {"id", "name"}
+    assert {
+        registry.resolve_value(handle) for handle in inventories[0].record_handles
+    } == {"42"}
