@@ -187,7 +187,17 @@ def test_unsafe_safe_headers_are_rejected() -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["Host", ":authority", "Connection", "Content-Length", "Transfer-Encoding", "Forwarded"],
+    [
+        "Host",
+        ":authority",
+        "Connection",
+        "Content-Length",
+        "Transfer-Encoding",
+        "Forwarded",
+        "X-Forwarded-Host",
+        "X-Original-URL",
+        "X-HTTP-Method-Override",
+    ],
 )
 def test_forbidden_static_headers_are_rejected_by_client(tmp_path: Path, name: str) -> None:
     registry = InMemorySessionValueRegistry()
@@ -315,6 +325,21 @@ def test_outer_provider_envelope_rejects_duplicate_or_nonfinite_json(
         client.propose_tests(build_sanitized_context((_candidate(),)))
 
 
+def test_deeply_nested_provider_envelope_is_typed_error(tmp_path: Path) -> None:
+    nested = b"{" * 5000 + b"null" + b"}" * 5000
+    registry = InMemorySessionValueRegistry()
+    secret = registry.store_secret(purpose="provider_api_key", value=API_KEY)
+    guard = _scope(tmp_path / "provider.yaml", allowed_path="/v1/chat/completions")
+    client = OpenAICompatibleClient(
+        _config(api_key=secret),
+        secrets=registry,
+        provider_scope_guard=guard,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=nested)),
+    )
+    with pytest.raises(ProviderResponseError):
+        client.propose_tests(build_sanitized_context((_candidate(),)))
+
+
 def test_non_ascii_provider_secret_is_rejected_before_transport(tmp_path: Path) -> None:
     called = False
 
@@ -362,34 +387,31 @@ def test_redirect_target_is_checked_once_and_never_followed(tmp_path: Path) -> N
         seen.append(request)
         return httpx.Response(302, headers={"Location": "/v1/chat/completions/final"})
 
-    class GuardSpy(ScopeGuard):
-        def __init__(self, delegate: ScopeGuard) -> None:
-            super().__init__(delegate.config, now=NOW)
-            self.delegate = delegate
-            self.urls: list[str] = []
-
-        def require_allowed(self, url: str, method: str) -> object:
-            self.urls.append(url)
-            return self.delegate.require_allowed(url, method)
-
     delegate = _scope(
         tmp_path / "provider.yaml",
         allowed_path="/v1/chat/completions",
     )
-    spy = GuardSpy(delegate)
+    urls: list[str] = []
+    original_require_allowed = delegate.require_allowed
+
+    def spy_require_allowed(url: str, method: str) -> object:
+        urls.append(url)
+        return original_require_allowed(url, method)
+
+    delegate.require_allowed = spy_require_allowed  # type: ignore[method-assign]
     registry = InMemorySessionValueRegistry()
     secret = registry.store_secret(purpose="provider_api_key", value=API_KEY)
     client = OpenAICompatibleClient(
         _config(api_key=secret),
         secrets=registry,
-        provider_scope_guard=spy,
+        provider_scope_guard=delegate,
         transport=httpx.MockTransport(handler),
     )
 
     with pytest.raises(ProviderRedirectError):
         client.propose_tests(build_sanitized_context((_candidate(),)))
     assert len(seen) == 1
-    assert spy.urls == [
+    assert urls == [
         "https://llm.example.test/v1/chat/completions",
         "https://llm.example.test/v1/chat/completions/final",
     ]

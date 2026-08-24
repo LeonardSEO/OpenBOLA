@@ -50,6 +50,12 @@ _BLOCKED_STATIC_HEADERS = frozenset(
         "forwarded",
     }
 )
+_BLOCKED_STATIC_PREFIXES = (
+    "proxy-",
+    "x-forwarded-",
+    "x-original-",
+    "x-http-method-override",
+)
 
 
 class ProviderClientError(RuntimeError):
@@ -265,12 +271,19 @@ def _validate_static_headers(config: AIProviderConfig) -> dict[str, str]:
         if not isinstance(name, str):
             raise ProviderRequestError("provider static headers contain an invalid name")
         normalized = name.casefold()
-        if normalized in _BLOCKED_STATIC_HEADERS or normalized.startswith("proxy-"):
+        if normalized in _BLOCKED_STATIC_HEADERS or any(
+            normalized.startswith(prefix) for prefix in _BLOCKED_STATIC_PREFIXES
+        ):
             raise ProviderRequestError("provider static headers contain a forbidden name")
         if normalized not in _SAFE_STATIC_HEADERS and not normalized.startswith("x-"):
             raise ProviderRequestError("provider static headers contain a non-allowlisted name")
-        if not isinstance(value, str) or any(
-            ord(character) < 32 or ord(character) == 127 for character in value
+        if (
+            not isinstance(value, str)
+            or not value.isascii()
+            or not name.isascii()
+            or any(
+                ord(character) < 32 or ord(character) == 127 for character in value
+            )
         ):
             raise ProviderRequestError("provider static headers contain an unsafe value")
         headers[name] = value
@@ -294,7 +307,7 @@ def _strict_json_document(raw: bytes) -> object:
             raise ValueError
 
         return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
-    except (UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError):
+    except (RecursionError, UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError):
         raise ProviderResponseError("provider response is not valid JSON") from None
 
 
@@ -333,7 +346,7 @@ class OpenAICompatibleClient:
             raise ValueError("OpenAI-compatible client requires an OpenAI-compatible config")
         if not hasattr(secrets, "resolve_secret"):
             raise TypeError("secrets must provide the SessionValueRegistry protocol")
-        if not isinstance(provider_scope_guard, ScopeGuard):
+        if type(provider_scope_guard) is not ScopeGuard:
             raise TypeError("provider_scope_guard must be a confirmed ScopeGuard")
         self._config = config
         self._secrets = secrets
@@ -437,7 +450,7 @@ class AzureOpenAIClient(OpenAICompatibleClient):
         self._config = config
         if not hasattr(secrets, "resolve_secret"):
             raise TypeError("secrets must provide the SessionValueRegistry protocol")
-        if not isinstance(provider_scope_guard, ScopeGuard):
+        if type(provider_scope_guard) is not ScopeGuard:
             raise TypeError("provider_scope_guard must be a confirmed ScopeGuard")
         self._secrets = secrets
         self._provider_scope_guard = provider_scope_guard
