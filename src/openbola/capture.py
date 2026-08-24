@@ -71,6 +71,8 @@ class CaptureConfig:
             raise CaptureError("max_har_bytes must be greater than zero")
         if self.login_recipe is not None and self.interactive_login:
             raise CaptureError("login_recipe and interactive_login are mutually exclusive")
+        if self.login_recipe is not None and not isinstance(self.login_recipe, LoginRecipe):
+            raise CaptureError("login_recipe must be a LoginRecipe")
 
 
 _LOGIN_SECRET_FIELD_KINDS = frozenset({"static", "totp"})
@@ -192,7 +194,7 @@ async def capture_har(
     collector: CaptureCollector | None = None,
     registry: Any | None = None,
 ) -> Path:
-    """Write a sanitized HAR after a session without navigating the target URL."""
+    """Write a sanitized HAR after a session, never navigating config.target_url itself."""
     try:
         async_api = importlib.import_module("playwright.async_api")
         async_playwright = async_api.async_playwright
@@ -219,7 +221,7 @@ async def capture_har(
                     page = await context.new_page()
                     try:
                         await _perform_login(page, config.login_recipe, registry)
-                    except async_api.Error as exc:
+                    except (async_api.Error, LookupError) as exc:
                         raise CaptureError(
                             "automated login did not reach success_url_pattern"
                         ) from exc

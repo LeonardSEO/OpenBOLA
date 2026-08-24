@@ -1116,6 +1116,20 @@ def test_capture_config_rejects_login_recipe_with_interactive_login(tmp_path: Pa
         )
 
 
+def test_capture_config_rejects_non_login_recipe_login_recipe(tmp_path: Path) -> None:
+    from openbola.capture import CaptureConfig
+
+    fake_recipe = SimpleNamespace(start_url="https://app.example.test/login")
+    with pytest.raises(CaptureError, match="LoginRecipe"):
+        CaptureConfig(
+            target_url="https://app.example.test/",
+            capture_root=tmp_path,
+            output_path=Path("out.har"),
+            identity="alice",
+            login_recipe=fake_recipe,  # type: ignore[arg-type]
+        )
+
+
 def test_capture_har_requires_registry_when_login_recipe_is_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1139,3 +1153,153 @@ def test_capture_har_requires_registry_when_login_recipe_is_set(
         asyncio.run(
             capture_har(_login_config(tmp_path, recipe), Guard(), collector=Collector())
         )
+
+
+def test_capture_har_translates_lookup_error_from_mismatched_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbola.capture import LoginRecipe, capture_har
+    from openbola.handles import InMemorySessionValueRegistry
+
+    minting_registry = InMemorySessionValueRegistry()
+    recipe = LoginRecipe(
+        name="staging-portal",
+        start_url="https://app.example.test/login",
+        username_selector="#email",
+        password_selector="#password",  # noqa: S106 - CSS selector, not a secret
+        submit_selector="#submit",
+        success_url_pattern="**/dashboard",
+        username_secret=minting_registry.store_secret(purpose="username", value="alice"),
+        password_secret=minting_registry.store_secret(purpose="password", value="hunter2"),
+    )
+    mismatched_registry = InMemorySessionValueRegistry()
+    _, Collector = _login_harness(monkeypatch)
+
+    with pytest.raises(CaptureError, match="login") as excinfo:
+        asyncio.run(
+            capture_har(
+                _login_config(tmp_path, recipe),
+                Guard(),
+                collector=Collector(),
+                registry=mismatched_registry,
+            )
+        )
+    assert isinstance(excinfo.value.__cause__, LookupError)
+
+
+def test_capture_har_login_post_body_is_sanitized_in_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbola import capture
+    from openbola.capture import InMemoryEventCollector, LoginRecipe, capture_har
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    recipe = LoginRecipe(
+        name="staging-portal",
+        start_url="https://app.example.test/login",
+        username_selector="#email",
+        password_selector="#password",  # noqa: S106 - CSS selector, not a secret
+        submit_selector="#submit",
+        success_url_pattern="**/dashboard",
+        username_secret=registry.store_secret(purpose="username", value="alice"),
+        password_secret=registry.store_secret(purpose="password", value="hunter2"),
+    )
+
+    class FakePlaywrightError(Exception):
+        pass
+
+    class FakeRequest:
+        def __init__(self) -> None:
+            self.method = "POST"
+            self.url = "https://app.example.test/login"
+            self.headers = {"content-type": "application/x-www-form-urlencoded"}
+            self.post_data = "email=alice&password=hunter2"
+
+    class FakeResponse:
+        def __init__(self, request: "FakeRequest") -> None:
+            self.request = request
+            self.status = 302
+            self.headers = {"location": "https://app.example.test/dashboard"}
+
+    class Context:
+        def __init__(self) -> None:
+            self._handlers: dict[str, Any] = {}
+
+        def on(self, event: str, handler: object) -> None:
+            self._handlers[event] = handler
+
+        async def route(self, pattern: str, handler: object) -> None:
+            return None
+
+        async def new_page(self) -> "Page":
+            return Page(self)
+
+        async def close(self) -> None:
+            return None
+
+    class Page:
+        def __init__(self, context: Context) -> None:
+            self._context = context
+
+        async def goto(self, url: str, **kwargs: object) -> None:
+            return None
+
+        async def fill(self, selector: str, value: str, **kwargs: object) -> None:
+            return None
+
+        async def click(self, selector: str, **kwargs: object) -> None:
+            request = FakeRequest()
+            self._context._handlers["request"](request)
+            self._context._handlers["response"](FakeResponse(request))
+
+        async def wait_for_url(self, pattern: str, **kwargs: object) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class Browser:
+        async def new_context(self, *, service_workers: str) -> Context:
+            return Context()
+
+        async def close(self) -> None:
+            return None
+
+    class Chromium:
+        async def launch(self, **kwargs: object) -> Browser:
+            return Browser()
+
+    class Manager:
+        async def __aenter__(self) -> object:
+            return SimpleNamespace(chromium=Chromium())
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        capture.importlib,
+        "import_module",
+        lambda _: SimpleNamespace(
+            async_playwright=lambda: Manager(),
+            Error=FakePlaywrightError,
+        ),
+    )
+
+    output = asyncio.run(
+        capture_har(
+            _login_config(tmp_path, recipe),
+            Guard(),
+            collector=InMemoryEventCollector(),
+            registry=registry,
+        )
+    )
+
+    output_bytes = output.read_bytes()
+    assert b"hunter2" not in output_bytes
+
+    document = json.loads(output_bytes)
+    [entry] = document["log"]["entries"]
+    assert entry["request"]["method"] == "POST"
+    assert entry["request"]["postData"]["text"] == "[REDACTED]"
+    assert entry["response"]["status"] == 302
