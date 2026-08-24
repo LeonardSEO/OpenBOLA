@@ -98,7 +98,6 @@ class GrantSummary:
     cleanup_policy: str
     scope_digest: str
 
-@dataclass(frozen=True)
 class CancellationToken(Protocol):
     def is_cancelled(self) -> bool: ...
     def cancel(self) -> None: ...
