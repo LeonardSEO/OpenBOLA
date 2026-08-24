@@ -237,6 +237,8 @@ def write_sha256sums(artifacts: Sequence[TargetArtifact], output: Path) -> None:
             item.archive_digest
         ):
             raise ValueError("archive digest is invalid")
+        if item.archive_digest != _digest(item.archive):
+            raise ValueError("archive digest does not match file")
     lines = [f"{item.archive_digest}  {item.archive.name}" for item in artifacts]
     content = "\n".join(sorted(lines, key=lambda line: line.split("  ", 1)[1])) + "\n"
     _atomic_bytes(Path(output), content.encode())

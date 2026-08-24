@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 import tarfile
 from importlib.util import module_from_spec, spec_from_file_location
@@ -85,7 +86,8 @@ def test_archive_and_checksum_are_deterministic(tmp_path: Path) -> None:
         suffix = ".zip" if target == "windows-x64" else ".tar.gz"
         archive = tmp_path / f"openbola-0.1.0-{target}{suffix}"
         archive.write_bytes(target.encode())
-        checksum_artifacts.append(TargetArtifact(target, "0.1.0", archive, "", "a" * 64))
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        checksum_artifacts.append(TargetArtifact(target, "0.1.0", archive, "", digest))
     write_sha256sums(checksum_artifacts, sums)
     lines = sums.read_text().splitlines()
     assert lines == sorted(lines, key=lambda line: line.split("  ", 1)[1])

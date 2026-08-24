@@ -211,12 +211,13 @@ plans before it.
    (Playwright browser install + self-test), `openbola doctor`,
    `openbola report RUN`, `openbola update` (GitHub Release check, checksum
    verify, explicit-confirm replace), local read-only `openbola mcp` reusing
-   the renamed MCP server from P1.
+   the renamed MCP server from P1. **P9 implementation complete; no-argument
+   TUI launch remains the P8 gate.**
 10. **P10 — Distribution packaging**. PyInstaller specs for the three
     platform targets, `install.sh`/`install.ps1`, `SHA256SUMS`, release
-    workflow. *This machine is macOS — the Windows x64 build must run on
-    Windows CI; this plan produces the build config and macOS-side
-    verification, not a cross-compiled Windows artifact.*
+    workflow. **P10 local packaging complete.** *This machine is macOS — the
+    Windows x64 build and clean-machine acceptance must run on native CI/target
+    machines; this plan does not claim a cross-compiled Windows artifact.*
 11. **P11 — Visual design & GitHub launch**. README hero/badges/demo,
     social-preview image, repository rename/topics/security URL. **P11 local launch materials complete; external GitHub launch pending approval.** The
     approval-gated checklist is [docs/launch/github-launch-checklist.md](../../launch/github-launch-checklist.md);
