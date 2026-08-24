@@ -136,6 +136,30 @@ def test_invalid_vault_key_never_leaks_material_and_blocks_browser(tmp_path: Pat
     assert not marker_path(root).exists()
 
 
+def test_vault_key_that_changes_between_reads_fails_closed(tmp_path: Path) -> None:
+    class RotatingVault:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_or_create_key(self) -> bytes:
+            self.calls += 1
+            return bytes([self.calls]) * 32
+
+    root = tmp_path / "OpenBOLA"
+    vault = RotatingVault()
+    installer = FakeInstaller()
+    result = run_setup(
+        root=root,
+        installer=installer,
+        browser_self_test=FakeSelfTest(),
+        vault=vault,
+    )
+
+    assert result.reason_code == "vault_unavailable"
+    assert installer.install_calls == []
+    assert not marker_path(root).exists()
+
+
 def test_self_test_failure_does_not_publish_partial_marker(tmp_path: Path) -> None:
     root = tmp_path / "OpenBOLA"
     result = _setup(root, self_test=FakeSelfTest(False))
