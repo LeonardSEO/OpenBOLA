@@ -1,23 +1,31 @@
-# BOLACheck
+![OpenBOLA — proof, not permission.](docs/assets/openbola-hero.svg)
+
+[![status: local launch materials](https://img.shields.io/badge/status-local%20launch%20materials-1D436E.svg)](#status)
+[![platforms: Windows x64 · macOS arm64 · macOS x64](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20macOS%20arm64%20%7C%20macOS%20x64-1D436E.svg)](#limitations)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-1B2230.svg)](#install-for-development)
+[![Apache-2.0 license](https://img.shields.io/badge/license-Apache--2.0-697386.svg)](LICENSE)
+
+# OpenBOLA
 
 Authorization-first, deterministic BOLA/IDOR validation for HTTP APIs.
 
-BOLACheck is an open-source defensive testing library for teams that have
-written permission to assess an API. It correlates traffic from multiple
-identities, records only evidence-backed ownership, and compares an owner's
-request with an attacker's request for the same object. The target-probe
-network boundary belongs to the deterministic executor; separately scoped
-browser capture can collect structural traffic. The optional AI layer can
-suggest a typed plan, but cannot send a target request or widen policy.
+OpenBOLA is an open-source, local-first application for teams with written
+permission to assess an API. It correlates traffic from multiple identities,
+records only evidence-backed ownership, and compares an owner's request with
+an attacker's request for the same object. The target-probe network boundary
+belongs to the deterministic executor; separately scoped browser capture can
+collect structural traffic. AI may suggest a typed plan from sanitized
+evidence, but it has no target-network access and cannot widen policy.
 
-> **Alpha:** this repository is under active development. Test only systems you
-> own or systems covered by explicit, written authorization. The command-line
-> orchestrator is read-only by default and the local vulnerable/protected mock
-> target is included for development and CI proof.
+> **Local v1 materials:** the visual launch surface, demo transcript, packaging
+> contracts, and approval-gated GitHub checklist are checked in. The repository
+> rename, release, and other external launch actions are still pending separate
+> approval. Test only systems you own or systems covered by explicit, written
+> authorization.
 
-## Why BOLACheck?
+## Why OpenBOLA?
 
-Many authorization tests stop at “the endpoint returned 200”. BOLACheck keeps
+Many authorization tests stop at “the endpoint returned 200”. OpenBOLA keeps
 the decision auditable:
 
 - ownership is persisted only when the captured evidence is explicit or an
@@ -34,9 +42,10 @@ the decision auditable:
   state and reports distinguish untested, inconclusive, protected, and BOLA
   outcomes.
 
-## Current status
+## Status
 
-The implementation currently includes these phase modules:
+The implementation is organized as roadmap items P1–P11 and currently includes
+these contracts:
 
 | Area | Module | Current contract |
 | --- | --- | --- |
@@ -46,18 +55,28 @@ The implementation currently includes these phase modules:
 | Audit state | `state.py` | SQLite migrations, opaque credential/object references, append-only audit records |
 | Endpoint evidence | `endpoints.py` | Candidate discovery and strong ownership correlation |
 | Deterministic probes | `executor.py` | Bounded HTTP probes, manual redirects, response comparison, reversible mutation boundary |
-| Optional planning | `ai.py` | Bounded JSON plan suggestions; no target-network client or execution authority |
+| Planning | `ai.py` | Bounded typed plan suggestions from sanitized evidence; no target-network client or execution authority |
+| Provider discovery | `providers/` | Generic HTTP plus Hasura, Supabase, PostgREST, and Firebase evidence adapters |
 | Local MCP adapter | `mcp_server.py` | Optional stdio adapter around a testable service; FastMCP is lazy-loaded |
-| Reports | `reporting.py` | Deterministic JSON, JUnit XML, Markdown, and SARIF output |
-| CLI/pipeline | `cli.py`, `pipeline.py` | Scope-enforced read-only orchestration with machine-safe JSON mode |
+| Reports | `reporting.py` | Deterministic `report.html`, `report.csv`, `report.json`, `report.md`, `junit.xml`, and `report.sarif` output |
+| CLI/TUI | `cli.py`, `pipeline.py`, `tui.py` | Interactive local TUI plus headless, scope-enforced commands with machine-safe JSON mode |
 | Local demo | `mock_target.py` | Ephemeral `127.0.0.1` vulnerable and protected endpoints |
 
-The installed `bolacheck` entry point exposes the `scan` command. Credentials
-are supplied only by environment-variable references; a traffic HAR is
-sanitized on import and cannot provide a replay token or response-body
+The installed `openbola` entry point opens the local TUI when invoked without a
+subcommand, while headless commands remain available for CI and automation.
+Credentials are supplied only by environment-variable references; a traffic
+HAR is sanitized on import and cannot provide a replay token or response-body
 ownership evidence by itself. Use a bounded, sanitized records JSON file (via
 `--identity NAME=records.json` or `IdentityInput.records_path`) when response
 bodies are required for correlation.
+
+P10 produces these platform-specific bundle names when the native release
+workflow runs: `openbola-VERSION-windows-x64.zip`,
+`openbola-VERSION-macos-arm64.tar.gz`, and
+`openbola-VERSION-macos-x64.tar.gz`, plus `SHA256SUMS`. Each bundle contains a
+checksum-verifying `install.ps1` (Windows) or `install.sh` (macOS). This
+checkout does not claim native Windows or macOS x64 acceptance; see
+[Limitations](#limitations).
 
 ## Safety boundary
 
@@ -70,8 +89,17 @@ non-negotiable rules are:
 3. Redirects are never followed implicitly. Every target is checked again.
 4. `GET`, `HEAD`, and `OPTIONS` are the safe default. `POST`, `PUT`, `PATCH`,
    and `DELETE` need an explicit mutation grant; a write probe additionally
-   needs an operator-supplied canary and cleanup request.
-5. Do not use the tool for unsolicited scanning, credential attacks,
+   needs an operator-supplied canary, immediate verification, restore, and
+   restore verification. Mutation recovery is recorded if a run is interrupted.
+5. Credentials live behind the local credential vault and environment
+   references; tokens, cookies, passwords, raw identifiers, and request/response
+   bodies are never logged, committed, or persisted in reports.
+6. AI may propose a typed plan from sanitized handles and observed schemas. It
+   has no target-network access, cannot execute requests, and cannot widen the
+   confirmed scope or mutation grant.
+7. Every attempted combination and finding is an append-only audit record.
+   OpenBOLA has no telemetry and makes no background network calls.
+8. Do not use the tool for unsolicited scanning, credential attacks,
    persistence, data extraction, destructive actions, denial of service, or
    bypassing access controls outside the written scope.
 
@@ -90,17 +118,22 @@ uv run mypy src
 uv run pytest
 ```
 
-Optional capabilities are deliberately separate:
+For a packaged native bundle, extract the archive for your platform, verify
+`SHA256SUMS` and the bundle's `openbola.sha256`, then run its local installer.
+The installer never downloads code and asks before editing `PATH`:
 
 ```bash
-uv sync --extra ai       # LiteLLM adapter
-uv sync --extra mcp      # FastMCP stdio adapter
-uv sync --extra capture  # Playwright capture adapter
+# macOS: ./install.sh --bin-dir "$HOME/.local/bin" --yes --no-path
+# Windows PowerShell: .\install.ps1 -BinDir "$HOME\\.local\\bin" -Yes -NoPath
+openbola setup
 ```
 
-`uv sync --extra all` installs all optional capabilities. A browser binary is
-still an operator-managed Playwright installation; capture is not a license to
-navigate an unapproved target.
+`openbola setup` prepares the pinned browser and local credential-vault
+prerequisites, then runs a local self-test. The browser binary remains an
+operator-managed dependency; setup never navigates to a target. Optional
+capture and local MCP support are installed with `uv sync --extra all` when
+needed. Native acceptance for Windows x64 and macOS x64 is provided by the
+P10 CI matrix, not inferred from this macOS arm64 checkout.
 
 ## Working with a scope
 
@@ -148,11 +181,58 @@ The normal read comparison reports one of `protected`, `bola`, `inconclusive`,
 or `skipped`. Mutation mode is a separate opt-in path and never retries the
 mutation automatically.
 
-`reporting.py` renders deterministic JSON, JUnit XML, Markdown, and SARIF. A
-report with zero findings is not proof that a target was safe: untested and
-inconclusive combinations remain visible in the summary and limitations.
+### Provider support
 
-## Read-only CLI
+Discovery always includes a generic HTTP/OpenAPI/GraphQL path. Evidence-backed
+adapters add normalized inventory for Hasura, Supabase, PostgREST, and Firebase;
+an adapter describes observed HTTP or GraphQL traffic and never owns an HTTP
+client. A provider label is therefore a finding about observed evidence, not a
+claim that OpenBOLA can scan an arbitrary database protocol.
+
+### Report artifacts
+
+Every completed run publishes one deterministic, sanitized bundle:
+
+| File | Use |
+| --- | --- |
+| `report.html` | Self-contained local findings view |
+| `report.csv` | Resource and capability matrix |
+| `report.json` | Typed `openbola-report-v1` document |
+| `report.md` | Human-readable assessment |
+| `junit.xml` | CI test-result integration |
+| `report.sarif` | Code-scanning result integration |
+
+Reports contain opaque handles and evidence-backed outcomes only. A report with
+zero findings is not proof that a target was safe: untested and inconclusive
+combinations remain visible in the summary and limitations.
+
+## CLI and headless CI
+
+The default `openbola` command opens the local TUI. The same safety contracts
+are available to scripts and CI through these headless commands:
+
+```text
+openbola                         # local TUI
+openbola scan                    # read-only assessment
+openbola setup                   # browser, vault, and local self-test
+openbola doctor                  # platform and recovery diagnostics
+openbola report RUN              # reopen a sanitized report
+openbola update                  # check and explicitly confirm an update
+openbola mcp                     # local read-only stdio adapter
+openbola --version
+```
+
+For headless CI, keep the scope and records files in the runner's protected
+workspace, inject only environment-variable names for credentials, and request
+JSON output:
+
+```bash
+uv run openbola scan --scope ./scope.yaml --base-url https://staging.example.test --identity alice=./alice.json --identity bob=./bob.json --credential alice=BOLA_ALICE_TOKEN --credential bob=BOLA_BOB_TOKEN --db ./state/engagement.db --report-dir ./reports/engagement --json
+```
+
+The CI job should archive only the six sanitized report artifacts and its
+bounded exit/summary data; never upload scope files, credential stores, HAR
+files, raw request/response bodies, or local state databases.
 
 Create a confirmed scope file first, then provide one sanitized structural
 records JSON file per identity when automatic ownership evidence is intended.
@@ -165,7 +245,7 @@ secret manager; the exact command depends on that secret manager:
 
 ```bash
 mkdir -p ./state
-uv run bolacheck scan \
+uv run openbola scan \
   --scope ./scope.yaml \
   --base-url https://staging.example.test \
   --identity alice=./alice.json \
@@ -195,21 +275,21 @@ uv run pytest tests/test_e2e.py -q
 The mock binds only to `127.0.0.1` on an ephemeral port. It is a fixture, not
 an authorization bypass or a substitute for an approved target.
 
-## Optional AI and MCP
+## AI planning and local MCP
 
 The AI adapter receives a bounded, redacted structural context and must return
 strict JSON matching the `TestPlan`/`TestSuggestion` models. Suggestions are
-validated against the observed context and are not executable requests. The
-Codex CLI adapter is intentionally disabled because a general agent cannot meet
-this boundary. The optional LiteLLM adapter may contact the model provider
-configured by the operator, but it cannot contact the assessed target or
-execute a proposed request.
+validated against observed handles, methods, fields, and scope and are never
+executable requests. AI has no target-network access: all target traffic is
+sent only by the deterministic, ScopeGuard-enforced executor after the local
+operator reviews the typed plan. Provider credentials remain in the local
+vault and resolved values never enter the model context.
 
-`mcp_server.py` exposes the service through an optional local stdio FastMCP
+`openbola mcp` exposes the service through an optional local stdio FastMCP
 adapter. Its tool arguments accept paths, identities, and environment-variable
 names, never secret values. The service requires a successfully loaded scope
 and initialized state before planning or running work. FastMCP is imported only
-when `create_mcp_server()` is called.
+when `create_mcp_server()` is called, and the adapter is read-only by default.
 
 ## Architecture
 
@@ -223,17 +303,47 @@ secret-safe extraction + in-memory credential vault
 SQLite append-only audit state
       |
 evidence-based endpoint ownership
-      |                         optional typed AI suggestions
+      |                         typed AI suggestions (no target network)
       +----------------------<-----------------------------+
       |
 deterministic, scope-enforced probes
       |
-JSON / JUnit / Markdown / SARIF reports
+HTML / CSV / JSON / Markdown / JUnit / SARIF reports
 ```
 
 The phase responsibilities and contracts are described in
 [docs/architecture.md](docs/architecture.md). Implementation evidence and
 known follow-up work live under [docs/implementation](docs/implementation/).
+
+## Deterministic local demo
+
+The checked-in [terminal demo transcript](examples/demo/openbola-demo.cast) is
+an offline, synthetic P8/P9 fixture. It shows two identities, read-only
+discovery, a confirmed local BOLA read, an explicitly granted reversible
+`PATCH`, restore verification, and the six-artifact report summary. It contains
+opaque placeholders only; it is not evidence about an external target.
+
+## Roadmap and release status
+
+The detailed [v1 roadmap](docs/superpowers/plans/2026-08-24-openbola-v1-roadmap.md)
+tracks P1–P11. Local launch materials are complete, while repository rename,
+transfer, topics, security metadata, release publication, and social-preview
+upload remain separate approval-gated operations in the
+[GitHub launch checklist](docs/launch/github-launch-checklist.md).
+
+## Limitations
+
+- Native Windows x64, macOS arm64, and macOS x64 builds are produced by the
+  P10 matrix; this checkout proves only the checks that ran locally. A clean
+  machine must verify the packaged installer and first-run setup on each target.
+- Linux standalone packaging, code signing, telemetry, automatic updates, and
+  a local report server are out of scope for v1. `openbola update` checks,
+  verifies, and replaces only after explicit confirmation.
+- A zero findings result is not proof of safety. Untested, skipped, and
+  inconclusive combinations, incomplete identity evidence, and scope coverage
+  limits must be reviewed before drawing a conclusion.
+- OpenBOLA is not a substitute for a threat model, authorization review, or
+  human verification of every mutation grant and recovery outcome.
 
 ## Contributing
 
@@ -243,7 +353,7 @@ the public issue tracker.
 
 ## Disclaimer
 
-BOLACheck is a testing aid, not a guarantee of authorization correctness or
+OpenBOLA is a testing aid, not a guarantee of authorization correctness or
 the absence of vulnerabilities. You are responsible for obtaining permission,
 choosing a safe test environment, protecting captured material, and reviewing
 every mutation grant before execution.
