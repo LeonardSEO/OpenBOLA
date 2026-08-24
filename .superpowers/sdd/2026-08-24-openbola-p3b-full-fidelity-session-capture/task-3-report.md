@@ -41,4 +41,4 @@ uv run pytest tests/test_capture.py -q                           # passed in the
 - `73d8e77 feat: capture full session material in memory`
 - `f6b1c44 fix: reject duplicate full capture responses`
 - `4288ea3 fix: close full registry on capture setup failure`
-- Current adapter-view contract fix is included in the next commit.
+- `5d97a11 fix: expose ephemeral adapter record views` includes the adapter-view contract fix.
