@@ -189,3 +189,6 @@ boundaries. External P11 publication actions remain separately approval-gated.
   context allowlist, endpoint safety, deterministic sorting/dedup, and no
   handle/secret resolution all pass. Task 2 strict proposal parsing/binding
   may begin.
+- P5 Task 2 implementation is committed as `264e76d`: strict proposal JSON
+  parsing and exact inventory/target-scope validation. Local AI tests reached
+  51 passed with Ruff and strict mypy; independent review is pending.
