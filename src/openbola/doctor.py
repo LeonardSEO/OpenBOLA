@@ -56,6 +56,7 @@ _PROBE_CODES = frozenset(
         "browser_not_ready",
         "vault_ready",
         "vault_unavailable",
+        "vault_not_ready",
         "state_ready",
         "state_path_unavailable",
         "state_symlink",
