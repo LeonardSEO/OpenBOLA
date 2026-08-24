@@ -146,3 +146,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
 - P4d Task 1 implementation is committed as `e4522ce`: bounded stdlib GraphQL
   lexer/parser contracts and tests. Parser review is pending; Task 2 will add
   detection/inventory only after approval.
+- P4d Task 1 fixes `e4d7a07`, `4d87149`, and `0edfea7` harden delimiter,
+  argument/directive grammar, depth bounds, and valid variable definitions.
+  Final review approved: 8 parser tests passed with Ruff and strict mypy.
+  Task 2 may begin.
