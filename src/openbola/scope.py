@@ -228,6 +228,20 @@ class ScopeGuard:
             return False
         return True
 
+    @property
+    def scope_digest(self) -> str:
+        """Return the digest of the currently reviewed scope file.
+
+        The digest is metadata for in-process plans and journals.  Reading it
+        revalidates the loaded scope provenance first, so a plan cannot bind
+        itself to a scope file that changed after confirmation.
+        """
+        _require_loaded_scope(self.config)
+        digest = self.config._source_digest
+        if not isinstance(digest, bytes):  # pragma: no cover - provenance guard
+            raise ScopeError("ScopeConfig source provenance is incomplete.")
+        return digest.hex()
+
     def require_allowed(
         self,
         url: str,
