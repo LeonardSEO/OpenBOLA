@@ -405,6 +405,11 @@ class ProbeExecutor:
             raise ExecutorError("scoped request method must be uppercase")
         if not isinstance(id_field, str) or not id_field or len(id_field) > 256:
             raise ExecutorError("scoped request field is invalid")
+        if "?" in endpoint_template or "#" in endpoint_template:
+            # ScopeGuard authorizes URL paths, not query-string policy.  A
+            # scoped mutation/recovery request therefore cannot smuggle an
+            # unbound query or fragment through this primitive.
+            raise ExecutorError("scoped request endpoint must be path-only")
         if credential not in (target.owner_credential, target.attacker_credential):
             raise ExecutorError("scoped request credential is not bound to target")
         if credential.identity not in {target.owner_identity, target.attacker_identity}:
@@ -974,6 +979,7 @@ __all__ = [
     "MutationSafetyError",
     "MutationSpec",
     "ProbeExecutor",
+    "ScopedExchange",
     "TestResult",
     "TestTarget",
     "run_probe",

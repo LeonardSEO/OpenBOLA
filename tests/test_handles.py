@@ -4,6 +4,7 @@ from typing import assert_type
 
 import pytest
 
+import openbola.handles as handles_module
 from openbola.handles import (
     InMemorySessionValueRegistry,
     SecretHandle,
@@ -38,6 +39,20 @@ def test_registry_secret_handle_ids_are_random_and_non_semantic() -> None:
     assert first.id != second.id
     assert "hunter2" not in first.id
     assert "login_password" not in first.id
+
+
+def test_registry_handle_ids_normalize_unsafe_leading_token_character(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tokens = iter(("_unsafe-token", "-other-token"))
+    monkeypatch.setattr(handles_module.secrets, "token_urlsafe", lambda _: next(tokens))
+    registry = InMemorySessionValueRegistry()
+
+    secret = registry.store_secret(purpose="purpose", value="value")
+    value = registry.store_value(kind="record_id", value="record")
+
+    assert secret.id == "h_unsafe-token"
+    assert value.id == "h-other-token"
 
 
 def test_registry_stores_value_and_returns_random_handle() -> None:

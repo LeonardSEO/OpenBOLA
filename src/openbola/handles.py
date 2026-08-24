@@ -50,7 +50,12 @@ class SessionValueStore(SessionValueRegistry, Protocol):
 
 
 def _random_id() -> str:
-    return secrets.token_urlsafe(32)
+    token = secrets.token_urlsafe(32)
+    # ``token_urlsafe`` may begin with ``-`` or ``_``.  Handle bindings use a
+    # conservative opaque-token grammar whose first character must be
+    # alphanumeric, so normalize only that leading character without deriving
+    # the identifier from its value, purpose, or kind.
+    return token if token[0].isalnum() else f"h{token}"
 
 
 class InMemorySessionValueRegistry:

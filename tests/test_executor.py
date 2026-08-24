@@ -14,6 +14,7 @@ import yaml
 
 from openbola.credentials import CredentialVault
 from openbola.executor import (
+    ExecutorError,
     ExecutorLimits,
     MutationSafetyError,
     MutationSpec,
@@ -208,6 +209,25 @@ def test_request_scoped_returns_only_bounded_metadata(tmp_path: Path) -> None:
     assert exchange.body_fingerprint is not None
     assert sentinel not in repr(exchange)
     assert calls == [("GET", "Bearer owner-token")]
+
+
+def test_request_scoped_rejects_query_and_fragment_endpoints(tmp_path: Path) -> None:
+    executor, vault = _executor(
+        tmp_path,
+        lambda request: httpx.Response(200, json={"id": "doc-1"}),
+    )
+    target = _target(vault)
+    for endpoint in ("/v1/documents/{id}?expand=all", "/v1/documents/{id}#fragment"):
+        with pytest.raises(ExecutorError, match="path-only"):
+            executor.request_scoped(
+                target,
+                target.owner_credential,
+                method="GET",
+                endpoint_template=endpoint,
+                body=None,
+                content_type=None,
+                id_field="id",
+            )
 
 
 def test_redirects_are_manual_and_each_hop_is_checked(tmp_path: Path) -> None:
