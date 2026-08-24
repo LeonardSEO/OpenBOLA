@@ -258,3 +258,12 @@ boundaries. External P11 publication actions remain separately approval-gated.
   the typed `canonical_report_document()` with schema id
   `openbola-report-v1`/version 1. Independent review approved Task 2: 20
   focused reporting/boundary tests, full pytest 500, Ruff and strict mypy pass.
+- P7 Task 3 is committed as `3b5ffd4` with CSV/HTML and six deterministic v1
+  artifact payloads, plus follow-up `e7e3b91` for canonical CSV projection.
+  Independent review approved the six renderers (CSP-safe self-contained HTML,
+  escaped values, synthetic SARIF locations, typed evidence): 33 focused
+  reporting/E2E/CLI tests and full pytest 503 passed with Ruff and strict mypy.
+- P7 Task 4 integration is committed as `316d810`: existing atomic six-payload
+  publication was aligned with CLI/E2E/reporting assertions and sixth-write
+  failure leaves no destination or staging directory. Task 4 is approved by
+  the full 503-test regression; P7 Task 5 acceptance/roadmap gate remains.

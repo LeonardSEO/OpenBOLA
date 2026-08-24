@@ -1045,8 +1045,8 @@ def generate_html_report(bundle: ReportBundle) -> str:
             'content="default-src \'none\'; style-src \'unsafe-inline\'; '
             'script-src \'unsafe-inline\'">',
             "<title>OpenBOLA report</title><style>",
-            "body{font-family:system-ui,sans-serif;line-height:1.4;margin:2rem;" 
-            "background:#fff;color:#111}table{border-collapse:collapse;width:100%;margin:1rem 0}" 
+            "body{font-family:system-ui,sans-serif;line-height:1.4;margin:2rem;"
+            "background:#fff;color:#111}table{border-collapse:collapse;width:100%;margin:1rem 0}"
             "th,td{border:1px solid #bbb;padding:.4rem;text-align:left}"
             "input{padding:.4rem;min-width:18rem}"
             "</style></head><body>",
