@@ -235,7 +235,10 @@ def test_generic_adapter_routes_id_shaped_keys_to_handles_not_fields() -> None:
     # scope), and only the ID-shaped keys themselves are the concern here.
     assert {f.name for f in inv.fields} == set()
     resolved = {registry.resolve_value(h) for h in inv.record_handles}
-    assert resolved == {"-NqA1bC2dEfGhIjKlMn", "opaque_secret_record_4eC39HqLyjWDarjtT1zdp7dc"}
+    assert resolved == {
+        "-NqA1bC2dEfGhIjKlMn",
+        "opaque_secret_record_4eC39HqLyjWDarjtT1zdp7dc",
+    }
 
 
 def test_generic_adapter_routes_email_shaped_keys_to_handles() -> None:
