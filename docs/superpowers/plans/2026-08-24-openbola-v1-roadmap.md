@@ -106,9 +106,49 @@ plans before it.
      malformed URL — shared, pre-existing exposure with `GenericAdapter`,
      tracked for a future hardening pass since captured traffic is
      well-formed by construction.
-   - **P4c/P4d** — Firebase, Hasura adapters, written just-in-time now
-     that P4a/P4b's contracts and the origin/tenant-isolation and
-     sensitive-field-guard precedents have landed.
+   - **P4c** — Firebase Realtime Database adapter
+     (`FirebaseRealtimeDatabaseAdapter`, `name="firebase-rtdb"`). *Status:
+     complete, merged to main (2026-08-24).* Scoped to Realtime Database
+     only, the classic misconfigured-rules BOLA surface (unauthenticated
+     read/write on `*.firebaseio.com`/`*.firebasedatabase.app`). RTDB
+     embeds record IDs directly in the path (unlike PostgREST's
+     query-string filters), so this adapter reuses
+     `endpoints.templatize`/`endpoints._path_ids` after stripping RTDB's
+     mandatory `.json` REST suffix. Final review (opus) surfaced and
+     fixed before merge: path-embedded IDs had no sensitivity guard on
+     the parent segment, and RTDB's "key a node by the secret itself"
+     idiom (`/passwordResetTokens/<token>.json`, `/apiKeys/<key>.json` —
+     necessary because RTDB has no query-by-value) meant a live secret
+     could be minted as a probeable `record_id` handle — same leak class
+     as P4b's `eq.`-filter finding, one structural layer down (path
+     segment vs. query param); fixed by gating path-ID extraction through
+     `endpoints._is_sensitive_field` on each ID's parent segment. RTDB's
+     push-create response envelope (`POST .../messages.json` →
+     `{"name": "-NqA..."}`) was misread — the new record's own ID was
+     silently discarded and `"name"` was reported as a fabricated field —
+     fixed to route the envelope's ID to a handle and exclude `"name"`
+     from that record's fields. `inventory()` had no host gate, so any
+     `*.json` URL on any host (a web app's `manifest.json`, locale files,
+     etc. — extremely common in real traffic) was misreported as
+     `firebase-rtdb`; fixed by requiring `_is_rtdb_host` in addition to
+     the `.json` suffix (kept `detect()`'s looser signal for the
+     whole-record-set "should this adapter run" decision). Also fixed:
+     case-insensitive/userinfo-safe host matching via
+     `urlsplit(...).hostname`, and trailing-slash path normalization so
+     `/users/42/.json` groups with `/users/42.json`. Deferred to later
+     work: `classify_key`'s JSON-object-key routing (used for RTDB
+     "list" nodes) has no sensitivity gate on the key itself — only
+     path-embedded IDs got the new guard; worth a pass across
+     P4a/P4b/P4c's shared `classify_key` for JSON-body-key sensitivity
+     parity with the path/query-param guards now in place elsewhere.
+     **Firestore** (`firestore.googleapis.com`, a structurally different
+     typed-document REST envelope — fields are wrapped as
+     `{"fields": {"name": {"stringValue": "..."}}}`, not plain JSON) is
+     explicitly out of scope for P4c and not yet planned; a P4c-2 slot is
+     reserved for it, written just-in-time whenever it's prioritized.
+   - **P4d** — Hasura adapter, written just-in-time now that P4a/P4b/P4c's
+     contracts and the origin/tenant-isolation and
+     sensitive-field/sensitive-parent-guard precedents have landed.
 
    Ruling: every `RequestRecord` this codebase produces today (from both
    `capture.py`'s live collector and its HAR parser) already has its body
