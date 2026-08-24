@@ -128,3 +128,8 @@ boundaries. External P11 publication actions remain separately approval-gated.
   and makes GenericAdapter's synchronous body-ID inspection explicit. Review
   approved; 112 focused provider/discovery/capture tests passed with Ruff and
   strict mypy. P3b is now ready for final report-boundary checks before P4d.
+- Task 5 implementation is committed as `6977c2a`: sentinel fixture plus
+  negative persistence/reporting/AI/MCP tests; no production changes were
+  needed. Implementer reports targeted modules 102 passed and full pytest 373
+  passed with Ruff, strict mypy, and diff-check green. Independent review is
+  pending; after approval P3b is complete.
