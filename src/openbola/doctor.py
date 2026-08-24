@@ -43,6 +43,7 @@ _PROBE_CODES = frozenset(
         "data_root_ready",
         "data_root_missing",
         "data_root_symlink",
+        "data_root_untrusted",
         "data_root_not_private",
         "data_root_unreadable",
         "data_root_unavailable",
@@ -60,6 +61,7 @@ _PROBE_CODES = frozenset(
         "state_symlink",
         "state_parent_symlink",
         "state_missing",
+        "state_not_regular",
         "state_not_private",
         "state_schema_invalid",
         "state_schema_mismatch",
@@ -256,15 +258,27 @@ def _safe_path_components(path: Path) -> tuple[bool, bool]:
 
 
 def _private_directory(path: Path) -> _ProbeResult:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return _result("warning", "data_root_missing")
+    except (OSError, ValueError):
+        return _result("blocked", "data_root_unreadable")
+    if stat.S_ISLNK(metadata.st_mode):
+        return _result("blocked", "data_root_symlink")
+    if not stat.S_ISDIR(metadata.st_mode):
+        return _result("blocked", "data_root_untrusted")
     exists, symlink = _safe_path_components(path)
     if symlink:
         return _result("blocked", "data_root_symlink")
     if not exists:
         return _result("warning", "data_root_missing")
     try:
-        metadata = os.lstat(path)
         uid = getattr(os, "getuid", lambda: metadata.st_uid)()
-        if metadata.st_uid != uid or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        # The application data root is a private leaf (0700 or stricter),
+        # matching setup's trust boundary.  Shared ancestors may remain
+        # readable; only this persisted OpenBOLA directory is checked here.
+        if metadata.st_uid != uid or stat.S_IMODE(metadata.st_mode) & 0o077:
             return _result("blocked", "data_root_not_private")
     except (OSError, ValueError, AttributeError):
         return _result("blocked", "data_root_unreadable")
@@ -359,8 +373,8 @@ def _default_state_probe(path: Path | None) -> _ProbeResult:
         if stat.S_ISLNK(metadata.st_mode):
             return _result("blocked", "state_symlink")
         if not stat.S_ISREG(metadata.st_mode):
-            return _result("warning", "state_missing")
-        if metadata.st_uid != uid or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return _result("blocked", "state_not_regular")
+        if metadata.st_uid != uid or stat.S_IMODE(metadata.st_mode) & 0o077:
             return _result("blocked", "state_not_private")
         # URI mode=ro guarantees that diagnostics cannot create/migrate state.
         uri = absolute.as_uri() + "?mode=ro"

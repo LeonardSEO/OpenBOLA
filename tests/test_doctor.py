@@ -132,6 +132,37 @@ def test_symlinked_data_root_is_blocked(tmp_path: Path) -> None:
     assert root.code == "data_root_symlink"
 
 
+def test_non_directory_data_root_and_nonregular_state_are_blocked(tmp_path: Path) -> None:
+    root_file = tmp_path / "root-file"
+    root_file.write_text("not a directory", encoding="utf-8")
+    report = _ready_report(root_file)
+    root = next(item for item in report.diagnostics if item.name == "data_root")
+    assert root.status == "blocked"
+    assert root.code == "data_root_untrusted"
+
+    state_dir = tmp_path / "state-dir"
+    state_dir.mkdir()
+    report = run_doctor(
+        data_root_path=tmp_path,
+        db_path=state_dir,
+        browser_probe=lambda: True,
+        vault_probe=lambda: True,
+        recovery_gate=_Recovery("clear"),
+        platform="darwin",
+    )
+    state = next(item for item in report.diagnostics if item.name == "state")
+    assert state.status == "blocked"
+    assert state.code == "state_not_regular"
+
+
+def test_data_root_requires_private_leaf_mode(tmp_path: Path) -> None:
+    os.chmod(tmp_path, 0o755)  # noqa: S103 - deliberately unprivate fixture
+    report = _ready_report(tmp_path)
+    root = next(item for item in report.diagnostics if item.name == "data_root")
+    assert root.status == "blocked"
+    assert root.code == "data_root_not_private"
+
+
 def test_default_state_probe_is_read_only_and_checks_schema(tmp_path: Path) -> None:
     db_path = tmp_path / "state.db"
     StateStore(db_path)
@@ -170,6 +201,7 @@ def test_default_state_probe_rejects_symlink_and_bad_schema(tmp_path: Path) -> N
     with sqlite3.connect(bad) as connection:
         connection.execute("CREATE TABLE schema_version(singleton INTEGER, version INTEGER)")
         connection.execute("INSERT INTO schema_version VALUES (1, 2)")
+    os.chmod(bad, 0o600)
     report = run_doctor(
         data_root_path=tmp_path,
         db_path=bad,
