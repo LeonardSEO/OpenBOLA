@@ -119,3 +119,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   and sanitize hostile request/response exception text. Task 3 is complete and
   independently approved; capture tests 56 and full suite 362 passed with Ruff
   and strict mypy green. Task 4 remains the next P3b gate.
+- Task 4 implementation is committed as `f57b8e0`: provider discovery
+  interfaces consume `AdapterRecordView`, and scope/lifecycle/capture-to-
+  discovery regressions are present. Focused capture/discovery tests: 77
+  passed; Ruff and strict mypy passed. Independent review is pending.
