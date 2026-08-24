@@ -183,6 +183,33 @@ def test_each_initial_request_is_scope_checked(tmp_path: Path) -> None:
     assert guard.count == 2
 
 
+def test_request_scoped_returns_only_bounded_metadata(tmp_path: Path) -> None:
+    sentinel = "response-body-must-not-escape"
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.headers["authorization"]))
+        return httpx.Response(200, json={"email": "old@example.test", "body": sentinel})
+
+    executor, vault = _executor(tmp_path, handler)
+    target = _target(vault)
+    exchange = executor.request_scoped(
+        target,
+        target.owner_credential,
+        method="GET",
+        endpoint_template=target.endpoint_template,
+        body=None,
+        content_type=None,
+        id_field="email",
+    )
+
+    assert exchange.status == 200
+    assert exchange.object_values == ("old@example.test",)
+    assert exchange.body_fingerprint is not None
+    assert sentinel not in repr(exchange)
+    assert calls == [("GET", "Bearer owner-token")]
+
+
 def test_redirects_are_manual_and_each_hop_is_checked(tmp_path: Path) -> None:
     calls: list[str] = []
 
