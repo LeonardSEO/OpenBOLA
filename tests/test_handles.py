@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from typing import assert_type
+
 import pytest
 
 from openbola.handles import (
     InMemorySessionValueRegistry,
     SecretHandle,
+    SessionValueStore,
     ValueHandle,
 )
 
@@ -66,3 +69,29 @@ def test_registry_is_not_serializable() -> None:
     registry.store_secret(purpose="login_password", value="hunter2")
     with pytest.raises(TypeError):
         pickle.dumps(registry)
+
+
+def test_registry_satisfies_session_value_store_and_revokes_values_on_close() -> None:
+    registry = InMemorySessionValueRegistry()
+    assert isinstance(registry, SessionValueStore)
+    secret = registry.store_secret(purpose="login_password", value="HANDLE_SECRET_SENTINEL")
+    value = registry.store_value(kind="body", value=b"HANDLE_BODY_SENTINEL")
+
+    registry.close()
+    registry.close()
+
+    for operation in (
+        lambda: registry.resolve_secret(secret),
+        lambda: registry.resolve_value(value),
+        lambda: registry.store_secret(purpose="x", value="y"),
+        lambda: registry.store_value(kind="body", value=b"x"),
+    ):
+        with pytest.raises(RuntimeError, match="registry is closed"):
+            operation()
+
+
+def test_session_value_store_protocol_has_only_handle_operations() -> None:
+    registry: SessionValueStore = InMemorySessionValueRegistry()
+    handle = registry.store_value(kind="session_state", value={"cookie": "opaque"})
+    assert_type(handle, ValueHandle)
+    assert registry.resolve_value(handle) == {"cookie": "opaque"}
