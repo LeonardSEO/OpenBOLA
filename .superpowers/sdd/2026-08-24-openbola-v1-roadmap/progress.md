@@ -107,3 +107,8 @@ boundaries. External P11 publication actions remain separately approval-gated.
 - Contract gate before P4d: the P3b plan must explicitly expose the
   non-serializable `AdapterRecordView` required by the P4d plan; current
   `with_adapter_records()` wording still names raw `RequestRecord` values.
+- Task 3 implementation complete at `73d8e77` (bounded full-fidelity
+  collector, dual event multiplexer, shared scoped browser run, async response
+  draining, safe limits, and sanitized HAR publication). Implementer reported
+  55 capture tests passing with Ruff and strict mypy green; independent review
+  is pending.
