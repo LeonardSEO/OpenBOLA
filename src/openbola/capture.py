@@ -735,6 +735,8 @@ async def _run_scoped_capture(
         async_api = importlib.import_module("playwright.async_api")
         async_playwright = async_api.async_playwright
     except (ImportError, AttributeError) as exc:
+        if full_collector is not None and registry is not None:
+            registry.close()
         raise CaptureError("Playwright unavailable. Install openbola[capture].") from exc
 
     policy_failures: list[ScopeError] = []
