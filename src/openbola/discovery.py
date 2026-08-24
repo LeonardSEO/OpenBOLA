@@ -91,10 +91,10 @@ class GenericAdapter:
             field_names: set[str] = set()
             object_ids: set[str] = set()
             for record in group:
-                for key in _top_level_json_keys(record.body):
-                    _classify_key(key, field_names, object_ids)
-                for key in _top_level_json_keys(record.response_body):
-                    _classify_key(key, field_names, object_ids)
+                for key in top_level_json_keys(record.body):
+                    classify_key(key, field_names, object_ids)
+                for key in top_level_json_keys(record.response_body):
+                    classify_key(key, field_names, object_ids)
                 object_ids.update(extract_object_ids(record.url))
 
             fields = tuple(FieldInventory(name=name) for name in sorted(field_names))
@@ -125,7 +125,7 @@ if TYPE_CHECKING:
         return GenericAdapter(registry)
 
 
-def _classify_key(key: str, field_names: set[str], object_ids: set[str]) -> None:
+def classify_key(key: str, field_names: set[str], object_ids: set[str]) -> None:
     """Route object-ID-shaped or email-shaped JSON keys to handles, not field names."""
     if "@" in key or is_object_id(key):
         object_ids.add(key)
@@ -133,7 +133,7 @@ def _classify_key(key: str, field_names: set[str], object_ids: set[str]) -> None
         field_names.add(key)
 
 
-def _top_level_json_keys(body: bytes | None) -> set[str]:
+def top_level_json_keys(body: bytes | None) -> set[str]:
     if body is None:
         return set()
     try:

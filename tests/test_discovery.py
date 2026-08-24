@@ -231,7 +231,7 @@ def test_generic_adapter_routes_id_shaped_keys_to_handles_not_fields() -> None:
     inv = inventories[0]
     # Both top-level keys are ID-shaped, so no field names survive at this
     # level; the nested "name" fields are one level deeper than this
-    # provider-agnostic scan inspects (_top_level_json_keys only, per Fix 1's
+    # provider-agnostic scan inspects (top_level_json_keys only, per Fix 1's
     # scope), and only the ID-shaped keys themselves are the concern here.
     assert {f.name for f in inv.fields} == set()
     resolved = {registry.resolve_value(h) for h in inv.record_handles}
@@ -256,7 +256,7 @@ def test_generic_adapter_routes_email_shaped_keys_to_handles() -> None:
     inv = inventories[0]
     # The only top-level key is the email address; the nested "role" field
     # is one level deeper than this provider-agnostic scan inspects
-    # (_top_level_json_keys only, per Fix 1's scope).
+    # (top_level_json_keys only, per Fix 1's scope).
     assert {f.name for f in inv.fields} == set()
     assert {registry.resolve_value(h) for h in inv.record_handles} == {"alice@example.test"}
 
