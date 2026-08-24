@@ -182,6 +182,13 @@ class SessionExchange:
     request_material_handle: ValueHandle
     response_material_handle: ValueHandle
 
+@dataclass(frozen=True, slots=True, repr=False)
+class AdapterRecordView:
+    """Ephemeral adapter input; raw bodies never cross the session callback."""
+    record: RequestRecord
+    request_body: bytes | None
+    response_body: bytes | None
+
 @dataclass(frozen=True, init=False)
 class InSessionCapture:
     har_path: Path
@@ -200,12 +207,12 @@ class InSessionCapture:
     def browser_state(self) -> Mapping[str, object]: ...
     def with_adapter_records(
         self,
-        consumer: Callable[[Sequence[RequestRecord]], tuple[ResourceInventory, ...]],
+        consumer: Callable[[Sequence[AdapterRecordView]], tuple[ResourceInventory, ...]],
     ) -> tuple[ResourceInventory, ...]: ...
     def close(self) -> None: ...
 ```
 
-`SessionRequestMaterial` and `SessionResponseMaterial` are frozen private-to-capture dataclasses with `repr=False` on raw fields. They contain the raw URL, header mapping, and body for an exchange; both are stored only as `ValueHandle(kind="session_state")` values. `InSessionCapture` stores the `SessionValueStore` in a non-repr private field, disables pickle via `__reduce__`, and rejects a foreign exchange, a closed capture, a wrong handle kind, or a malformed resolved value with a non-sensitive `CaptureError`. Its callback bridge accepts only `tuple[ResourceInventory, ...]`; a direct raw `RequestRecord`, or any list/dict/tuple nesting a raw record, fails closed before return.
+`SessionRequestMaterial` and `SessionResponseMaterial` are frozen private-to-capture dataclasses with `repr=False` on raw fields. They contain the raw URL, header mapping, and body for an exchange; both are stored only as `ValueHandle(kind="session_state")` values. `AdapterRecordView` is the only P4d-facing full-fidelity view: its sanitized `record` is accompanied by ephemeral request/response bodies and it is non-serializable, non-repr, and valid only during the synchronous callback. `InSessionCapture` stores the `SessionValueStore` in a non-repr private field, disables pickle via `__reduce__`, and rejects a foreign exchange, a closed capture, a wrong handle kind, or a malformed resolved value with a non-sensitive `CaptureError`. Its callback bridge accepts only `tuple[ResourceInventory, ...]`; raw records or adapter views cannot be returned, persisted, logged, reported, or passed to AI/MCP.
 
 - [ ] **Step 1: Write failing boundary tests**
 
@@ -477,6 +484,7 @@ git commit -m "feat: capture full session material in memory"
 **Interfaces:**
 - Consumes: `capture_session()`, `InSessionCapture.with_adapter_records()`, `ProviderAdapter`, and existing `GenericAdapter`.
 - Produces: a callback-only full-record bridge. No function returns `Sequence[RequestRecord]` containing raw data.
+- The callback receives `Sequence[AdapterRecordView]`; P4d adapters may inspect raw bodies synchronously, while the returned value remains the strict safe inventory tuple.
 
 - [ ] **Step 1: Write failing scope and discovery bridge tests**
 
@@ -778,7 +786,7 @@ The final Task 5 pytest run is the criterion-8 proof when it includes this deter
 
 1. Fake Playwright emits one in-scope `POST` with a bearer-header sentinel, raw request ID, full response ID/value, and browser storage-state cookie sentinel.
 2. `capture_session()` completes one routed browser/context run, returns a handle-only `InSessionCapture`, and resolves the exact response body only while the session remains open.
-3. `with_adapter_records(GenericAdapter(registry).inventory)` observes the raw response body synchronously and returns only a `tuple[ResourceInventory, ...]` containing field names and `ValueHandle`s. Direct and nested raw-record callback returns fail closed; no raw `RequestRecord` is returned or stored.
+3. `with_adapter_records(GenericAdapter(registry).inventory)` observes the raw response body synchronously through `AdapterRecordView` and returns only a `tuple[ResourceInventory, ...]` containing field names and `ValueHandle`s. Direct and nested raw-record/view callback returns fail closed; no raw `RequestRecord`, adapter view, or full value is returned or stored.
 4. The session HAR and parsed HAR are scanned and contain none of the three sentinels; response bodies remain absent from parsed HAR records.
 5. State/SQLite sidecars, all report outputs, sanitized AI context, and MCP session records are byte/repr-scanned and contain none of the sentinels.
 6. A scope-denied request and each full-material limit fail before HAR/session return and revoke the registry; `InSessionCapture.close()` also revokes all handles.
@@ -789,7 +797,7 @@ The final Task 5 pytest run is the criterion-8 proof when it includes this deter
 
 **Placeholder scan:** This plan defines every production interface, limit, failure message, test command, test sentinel, and commit command. It contains no deferred implementation markers or cross-task shorthand.
 
-**Type consistency:** `SessionValueStore` is defined in Task 1 and used by Tasks 2–4. `SessionExchange`, `SessionRequestMaterial`, `SessionResponseMaterial`, `InSessionCapture`, and the `tuple[ResourceInventory, ...]` callback result are defined in Task 2 and consumed by Tasks 3–5. `capture_session()` is defined in Task 3 and used by Tasks 4–5. The raw-to-provider bridge is only `InSessionCapture.with_adapter_records()` throughout.
+**Type consistency:** `SessionValueStore` is defined in Task 1 and used by Tasks 2–4. `SessionExchange`, `SessionRequestMaterial`, `SessionResponseMaterial`, `AdapterRecordView`, `InSessionCapture`, and the `tuple[ResourceInventory, ...]` callback result are defined in Task 2 and consumed by Tasks 3–5. `capture_session()` is defined in Task 3 and used by Tasks 4–5. The raw-to-provider bridge is only `InSessionCapture.with_adapter_records()` throughout.
 
 ## Execution handoff
 

@@ -1,0 +1,109 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-08-24-openbola-v1-roadmap.md
+
+## Objective
+
+Complete P3b, P4d, and P5-P11 against the approved v1 design, preserving all
+authorization, credential, AI non-execution, append-only audit, and recovery
+boundaries. External P11 publication actions remain separately approval-gated.
+
+## Baseline
+
+- Branch: `main` (the user explicitly requested integration on main).
+- Starting commit: `954e93e3ffb1aad1f24ad642046bff96478e57df`.
+- Repository status at start: clean and tracking `origin/main`.
+- Existing roadmap completion: P1, P2, P3, P4a, P4b, P4c.
+- Required remaining work: P3b, P4d, P5, P6, P7, P8, P9, P10, P11.
+
+## Coordination rulings
+
+- Ruling: use one implementation agent at a time for shared code, while using
+  parallel read-only audit agents for independent subsystems — this preserves
+  the shared-worktree safety required by the harness; cost if wrong: less
+  implementation concurrency than the user's ideal one-shot fan-out.
+- Ruling: build P11 assets and documentation locally, but do not publish a
+  release or mutate external repository metadata without a new explicit
+  approval — required by design section 12; cost if wrong: the technical goal
+  may finish while the public launch remains pending.
+- Ruling: clean-machine Windows x64 and macOS x64/arm64 acceptance requires
+  native CI or machines; local static checks are not equivalent — cost if
+  wrong: completion remains unproven until platform runs exist.
+- Ruling: execute P3b before P4d, because sanitized capture removes GraphQL
+  documents and PostgREST query values that provider inventory needs — cost if
+  wrong: P4d planning waits on a larger capture change, but avoids claiming
+  synthetic-fixture coverage as production capture evidence.
+- Ruling: raw capture material remains stored only behind session handles; an
+  explicit ephemeral in-memory adapter view may resolve it for discovery, but
+  transferable/persisted records remain sanitized — this reconciles the spec's
+  `RequestRecord` adapter signature with its no-full-value-persistence rule;
+  cost if wrong: the ephemeral boundary needs unusually strong negative tests
+  against state, reports, AI payloads, MCP, and serialization.
+
+## Audit workstreams
+
+| Workstream | Scope | Shared producers/consumers | Status |
+|---|---|---|---|
+| A | P3b full-fidelity session capture | produces handles/session data for P5, P6, P8 | in progress |
+| B | P4d Hasura adapter | consumes discovery contracts; produces inventory for P5/P8 | in progress |
+| C | P5 BYOK AI planning | consumes handles/inventory/scope; produces typed plans for P6/P8 | in progress |
+| D | P6 mutations/recovery | consumes grants/registry/state; produces recovery/progress for P8/P9 | in progress |
+| E | P7 typed reporting | consumes findings/state; produces artifacts for P8/P9/P10 | in progress |
+| F | P8/P9 TUI and command shell | consumes P3b-P7 services; produces application UX for P10 | in progress |
+| G | P10/P11 distribution/launch | consumes complete app; produces artifacts and local launch assets | in progress |
+
+## Completion audit findings
+
+- P3b: no full response or browser-state capture existed; implementation plan
+  now exists and is sequenced before P4d.
+- P4d: Hasura inventory requires P3b's ephemeral full-fidelity adapter view;
+  sanitized HAR alone redacts GraphQL documents and variables.
+- P5: legacy LiteLLM planning is not the spec's `AIProviderConfig` /
+  `ProposedTest` contract and does not bind suggestions to inventory identities,
+  handles, fields, and current scope.
+- P6: existing mutation flow is mutation-plus-status-cleanup, not snapshot ->
+  unauthorized canary -> verify -> restore -> verify; no sweep preflight,
+  encrypted journal, OS vault, or startup gate exists.
+- P7: current deterministic reporting is four-format and generic-map based;
+  JUnit already exists, while CSV and HTML do not. The roadmap wording must be
+  corrected in the P7 plan.
+- P8/P9: no Textual/session/event layer exists; the CLI exposes only `scan`.
+  Windows-safe filesystem publication and MCP import primitives are also
+  missing.
+- P10/P11: no PyInstaller specs, native platform jobs, installers, checksum
+  manifest, attestations, or launch assets exist. Existing ignored `dist/`
+  artifacts are legacy BOLACheck artifacts and are not release inputs.
+
+## Additional rulings
+
+- Ruling: P5 provider traffic must use a separate confirmed `ScopeGuard`
+  constructed from a provider scope file, and every provider request must call
+  it; `AIProviderConfig` alone is not network authority — this preserves the
+  non-negotiable every-network-operation boundary; cost if wrong: BYOK setup
+  requires one additional explicit scope file.
+- Ruling: P6 may add `cryptography` and an explicit OS-vault dependency only
+  in its dedicated plan/task, with locked versions and native/fake-backend
+  tests — required to implement AES-GCM and persistent recovery keys; cost if
+  wrong: larger runtime and packaging surface.
+- Ruling: P7 introduces typed report-boundary models and a legacy-safe adapter,
+  not a hidden SQLite v4 migration — this avoids fabricating unavailable
+  capability/cleanup facts from historic rows; cost if wrong: richer typed
+  capability state may require a later explicit schema migration.
+- Ruling: split P9 into P9a command/services before packaging and P9b packaged
+  updater integration after P10 defines the install unit — cost if wrong: the
+  roadmap execution order becomes P9a -> P10 -> P9b rather than one atomic P9.
+- Ruling: setup/update distribution network cannot bypass `ScopeGuard`; if the
+  Playwright installer cannot expose every redirect for checking, P9 must use
+  an OpenBOLA-controlled downloader under a confirmed distribution scope or
+  remain unproven — cost if wrong: substantially more setup implementation.
+
+## P3b execution status
+
+- Task 1 complete: `258c750` (`SessionValueStore` lifecycle), independently
+  reviewed and approved.
+- Task 2 complete: `99d2003`, `0b34eb4`, and `d373cf8` (handle-only
+  in-session model, serialization blocking, strict adapter-result containment,
+  and subclass/extra-state regression coverage), independently re-reviewed and
+  approved. Focused capture tests: 5 passed; implementer reported full suite
+  357 passed with Ruff and strict mypy green.
+- Contract gate before P4d: the P3b plan must explicitly expose the
+  non-serializable `AdapterRecordView` required by the P4d plan; current
+  `with_adapter_records()` wording still names raw `RequestRecord` values.
