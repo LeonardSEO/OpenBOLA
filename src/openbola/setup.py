@@ -373,7 +373,10 @@ def _run_self_test(self_test: BrowserSelfTest | Any) -> bool:
         result = self_test()
     else:
         result = cast(Any, self_test).run()
-    return result is not False
+    # A local browser self-test must explicitly attest success.  Truthy
+    # sentinels, ``None``, and arbitrary objects are not proof that the browser
+    # launched and closed cleanly.
+    return result is True
 
 
 def _result(

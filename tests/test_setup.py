@@ -208,6 +208,24 @@ def test_self_test_failure_does_not_publish_partial_marker(tmp_path: Path) -> No
     assert not marker_path(root).exists()
 
 
+@pytest.mark.parametrize("invalid_result", [None, 0, "passed", object()])
+def test_self_test_requires_literal_true(tmp_path: Path, invalid_result: object) -> None:
+    class InvalidSelfTest:
+        def run(self) -> object:
+            return invalid_result
+
+    root = tmp_path / "OpenBOLA"
+    result = run_setup(
+        root=root,
+        installer=FakeInstaller(),
+        browser_self_test=InvalidSelfTest(),
+        vault=FakeVault(),
+    )
+
+    assert result.reason_code == "browser_self_test_failed"
+    assert not marker_path(root).exists()
+
+
 def test_installer_failure_is_generic_and_does_not_expose_exception(tmp_path: Path) -> None:
     class FailingInstaller(FakeInstaller):
         def install(self, *, force: bool = False) -> None:
