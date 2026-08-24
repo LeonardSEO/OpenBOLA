@@ -29,3 +29,15 @@ mutation sweep in commit `5b13b52` (`feat: verify and restore every mutation rec
 
 The working tree still contains unrelated pre-existing user documentation and
 scope-example edits; they were not staged by this task.
+
+## Review fixes
+
+Commit `d922480` (`fix: keep scoped handles and endpoints bounded`) addresses
+the review findings that generated session handles could begin with URL-safe
+punctuation and that the scoped primitive accepted query/fragment templates
+outside path-only ScopeGuard authorization. Regression tests cover both
+boundaries.
+
+- `uv run pytest tests/test_handles.py tests/test_mutations.py tests/test_executor.py -q` — 58 passed
+- `uv run ruff check src/openbola/handles.py src/openbola/executor.py src/openbola/mutations.py tests/test_handles.py tests/test_executor.py` — passed
+- `uv run mypy src` — passed
