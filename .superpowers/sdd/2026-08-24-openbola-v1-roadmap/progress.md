@@ -154,3 +154,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   origin-gated inventory, query/body helpers, and mutation-returning handling.
   Implementer reports 13 parser/provider tests plus targeted checks green;
   independent review is pending.
+- P4d Task 2 independently approved: origin partitions, header-only detection,
+  malformed fail-closed parsing, safe inventories, and mutation returning are
+  covered; targeted tests/Ruff/mypy passed. Task 3 (variable association and
+  sensitive-ID guards) may begin.
