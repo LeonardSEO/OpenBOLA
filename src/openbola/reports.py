@@ -1090,7 +1090,13 @@ class ReportLocator:
             _fail("run_not_found")
         try:
             escaped = quote(str(path), safe="/")
-            connection = sqlite3.connect(f"file:{escaped}?mode=ro", uri=True, timeout=1.0)
+            # ``immutable=1`` prevents SQLite from creating WAL/SHM sidecars
+            # while checking a numeric run reference.  This lookup is strictly
+            # read-only and must not mutate the state directory, even when the
+            # database was previously opened in WAL mode.
+            connection = sqlite3.connect(
+                f"file:{escaped}?mode=ro&immutable=1", uri=True, timeout=1.0
+            )
             try:
                 row = connection.execute(
                     "SELECT metadata_json FROM runs WHERE id = ? LIMIT 1", (run_id,)

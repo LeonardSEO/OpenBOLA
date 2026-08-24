@@ -44,7 +44,10 @@ def test_numeric_and_explicit_report_resolution_is_read_only(tmp_path: Path) -> 
     root = _private(tmp_path / "data")
     directory = _published(root)
     db_path = _db(tmp_path / "state.db")
-    before = db_path.stat().st_mtime_ns
+    before = (db_path.stat().st_mtime_ns, db_path.stat().st_size, db_path.read_bytes())
+    sidecars = (db_path.with_name(f"{db_path.name}-wal"), db_path.with_name(f"{db_path.name}-shm"))
+    for sidecar in sidecars:
+        assert not sidecar.exists()
 
     resolved = ReportLocator().resolve("7", db_path=db_path, data_root=root)
     assert resolved == directory
@@ -53,7 +56,9 @@ def test_numeric_and_explicit_report_resolution_is_read_only(tmp_path: Path) -> 
         ReportLocator().resolve("runs/7/report.json", db_path=db_path, data_root=root).name
         == "report.json"
     )
-    assert db_path.stat().st_mtime_ns == before
+    assert (db_path.stat().st_mtime_ns, db_path.stat().st_size, db_path.read_bytes()) == before
+    for sidecar in sidecars:
+        assert not sidecar.exists()
 
 
 def test_loader_rejects_missing_manifest_partial_bundle_and_schema(tmp_path: Path) -> None:
