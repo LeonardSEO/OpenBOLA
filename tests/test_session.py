@@ -71,6 +71,11 @@ def test_target_requires_confirmed_active_scope_and_returns_only_fingerprints(
                 target_url="https://api.example.test",
                 scope_path=_scope(tmp_path / "denied.yaml", confirmed="false"),
             )
+        with pytest.raises(SessionError, match="target configuration denied"):
+            session.configure_target(
+                target_url="https://other.example.test",
+                scope_path=_scope(tmp_path / "mismatch.yaml"),
+            )
 
         summary = session.configure_target(
             target_url="HTTPS://api.example.test:443/",

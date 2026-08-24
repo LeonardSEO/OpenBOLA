@@ -328,6 +328,14 @@ class AssessmentSession:
         origin = _normalize_origin(target_url)
         try:
             guard = ScopeGuard.from_file(Path(scope_path))
+            target_hostname = urlsplit(origin).hostname
+            if target_hostname is None:
+                raise ScopeError("target origin is invalid")
+            allowed_hosts = guard.config.allowed_hosts
+            if allowed_hosts and not any(
+                _hostname_matches(target_hostname, pattern) for pattern in allowed_hosts
+            ):
+                raise ScopeError("target origin is outside the confirmed scope")
             digest = guard.scope_digest
             authorization_fingerprint = hashlib.sha256(
                 guard.config.authorization_reference.encode("utf-8")
@@ -627,6 +635,13 @@ def _normalize_origin(value: str) -> str:
     )
     port_suffix = "" if port is None or default_port else f":{port}"
     return f"{parsed.scheme.lower()}://{host}{port_suffix}"
+
+
+def _hostname_matches(hostname: str, pattern: str) -> bool:
+    if pattern.startswith("*."):
+        suffix = pattern[1:]
+        return hostname.endswith(suffix) and hostname != pattern[2:]
+    return hostname == pattern
 
 
 __all__ = [
