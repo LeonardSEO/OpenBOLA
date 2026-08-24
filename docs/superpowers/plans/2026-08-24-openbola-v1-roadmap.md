@@ -167,21 +167,14 @@ plans before it.
    *leaf values* redacted to the literal string `"[REDACTED]"` by
    `_sanitize_body`/`_redact_json` — only JSON *key names* and *path
    segments* survive redaction; query-parameter values are redacted too.
-   There is currently no full-fidelity in-session `RequestRecord` path
-   anywhere in the codebase, even transiently. Spec §7 step 9 / §8 /
-   acceptance criterion 8 ("full values visible during the active TUI
-   session") therefore needs a new full-fidelity capture/collector path
-   that does not exist yet and is out of scope for both P3 (already
-   shipped, sanitized-only, correctly so per its own non-goals) and P4
-   (inventory only ever sees what `RequestRecord` already carries). Cost
-   if wrong: acceptance criterion 8 silently has no implementation owner
-   until this is caught. Resolution: `FieldInventory` (P4a) tracks field
-   *names* only, not value types (type inference from a redacted body
-   would be meaningless — every leaf is the string `"[REDACTED]"`). The
-   full-fidelity in-session path becomes explicit new work, tracked as P3b
-   before P4d and P8. P3b's handle-only local detail contract is sufficient
-   for the active TUI; P7 owns the typed finding/export boundary and retains
-   its sanitized-only contract.
+   Historical ruling (before P3b): every persisted `RequestRecord` had only
+   redacted leaf values, so a full-fidelity path was required for the active
+   TUI. P3b now supplies that path through process-local session handles and
+   the ephemeral `AdapterRecordView`; P4d consumes only that callback view.
+   `FieldInventory` still tracks field *names* only, while P7 retains its
+   sanitized-only reporting boundary. Full values remain forbidden in state,
+   reports, AI payloads, MCP, and serialization; acceptance criterion 8 is
+   therefore now owned by the unfinished P8 active-session/TUI work.
 5. **P5 — BYOK AI planning**. `AIProviderConfig`/`ProposedTest` contracts,
    `openai_compatible` + `azure_openai` clients, sanitized-context builder,
    and the validator that intersects every proposed handle/method/field/path
@@ -215,13 +208,16 @@ plans before it.
    (Playwright browser install + self-test), `openbola doctor`,
    `openbola report RUN`, `openbola update` (GitHub Release check, checksum
    verify, explicit-confirm replace), local read-only `openbola mcp` reusing
-   the renamed MCP server from P1. **P9 implementation complete; no-argument
-   TUI launch remains the P8 gate.**
+   the renamed MCP server from P1. **P9 command/services are implemented;
+   acceptance remains gated by a ScopeGuard-aware browser provisioner and an
+   explicit distribution scope for update traffic. The no-argument TUI launch
+   remains the P8 gate.**
 10. **P10 — Distribution packaging**. PyInstaller specs for the three
     platform targets, `install.sh`/`install.ps1`, `SHA256SUMS`, release
-    workflow. **P10 local packaging complete.** *This machine is macOS — the
-    Windows x64 build and clean-machine acceptance must run on native CI/target
-    machines; this plan does not claim a cross-compiled Windows artifact.*
+    workflow. **P10 local packaging implementation is complete.** *This
+    machine is macOS — the Windows x64 build, macOS x64 build, clean-machine
+    acceptance, and Textual-inclusive bundle require native CI/target evidence
+    after P8 lands; this plan does not claim those artifacts from this checkout.*
 11. **P11 — Visual design & GitHub launch**. README hero/badges/demo,
     social-preview image, repository rename/topics/security URL. **P11 local launch materials complete; external GitHub launch pending approval.** The
     approval-gated checklist is [docs/launch/github-launch-checklist.md](../../launch/github-launch-checklist.md);
