@@ -734,3 +734,143 @@ def test_playwright_import_is_lazy(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     )
     with pytest.raises(CaptureError):
         asyncio.run(capture.capture_har(make_config(tmp_path), Guard()))
+
+
+def test_login_secret_field_requires_non_empty_selector() -> None:
+    from openbola.capture import LoginSecretField
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    handle = registry.store_secret(purpose="totp_seed", value="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+
+    with pytest.raises(CaptureError, match="selector"):
+        LoginSecretField(selector="", secret=handle, kind="totp")
+
+
+def test_login_secret_field_rejects_unknown_kind() -> None:
+    from openbola.capture import LoginSecretField
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    handle = registry.store_secret(purpose="totp_seed", value="seed")
+
+    with pytest.raises(CaptureError, match="kind"):
+        LoginSecretField(selector="#otp", secret=handle, kind="sms")  # type: ignore[arg-type]
+
+
+def test_login_secret_field_rejects_non_secret_handle() -> None:
+    from openbola.capture import LoginSecretField
+
+    not_a_handle: Any = "not-a-handle"  # noqa: S105 - not a real secret
+    with pytest.raises(CaptureError, match="SecretHandle"):
+        LoginSecretField(selector="#otp", secret=not_a_handle)
+
+
+def _valid_login_recipe() -> Any:
+    from openbola.capture import LoginRecipe
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    return LoginRecipe(
+        name="staging-portal",
+        start_url="https://app.example.test/login",
+        username_selector="#email",
+        password_selector="#password",  # noqa: S106 - CSS selector, not a secret
+        submit_selector="#submit",
+        success_url_pattern="**/dashboard",
+        username_secret=registry.store_secret(purpose="username", value="alice"),
+        password_secret=registry.store_secret(purpose="password", value="hunter2"),
+    ), registry
+
+
+def test_login_recipe_accepts_a_minimal_valid_recipe() -> None:
+    recipe, _ = _valid_login_recipe()
+    assert recipe.name == "staging-portal"
+    assert recipe.extra_secret_fields == ()
+
+
+def test_login_recipe_rejects_empty_name() -> None:
+    from openbola.capture import LoginRecipe
+
+    recipe, _ = _valid_login_recipe()
+    with pytest.raises(CaptureError, match="name"):
+        LoginRecipe(
+            name="  ",
+            start_url=recipe.start_url,
+            username_selector=recipe.username_selector,
+            password_selector=recipe.password_selector,
+            submit_selector=recipe.submit_selector,
+            success_url_pattern=recipe.success_url_pattern,
+            username_secret=recipe.username_secret,
+            password_secret=recipe.password_secret,
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_start_url",
+    [
+        "not-a-url",
+        "ftp://app.example.test/login",
+        "https://user:pass@app.example.test/login",
+        "https://app.example.test/login?next=/x",
+    ],
+)
+def test_login_recipe_rejects_unsafe_start_url(bad_start_url: str) -> None:
+    from openbola.capture import LoginRecipe
+
+    recipe, _ = _valid_login_recipe()
+    with pytest.raises(CaptureError, match="start_url"):
+        LoginRecipe(
+            name=recipe.name,
+            start_url=bad_start_url,
+            username_selector=recipe.username_selector,
+            password_selector=recipe.password_selector,
+            submit_selector=recipe.submit_selector,
+            success_url_pattern=recipe.success_url_pattern,
+            username_secret=recipe.username_secret,
+            password_secret=recipe.password_secret,
+        )
+
+
+def test_login_recipe_rejects_empty_success_url_pattern() -> None:
+    from openbola.capture import LoginRecipe
+
+    recipe, _ = _valid_login_recipe()
+    with pytest.raises(CaptureError, match="success_url_pattern"):
+        LoginRecipe(
+            name=recipe.name,
+            start_url=recipe.start_url,
+            username_selector=recipe.username_selector,
+            password_selector=recipe.password_selector,
+            submit_selector=recipe.submit_selector,
+            success_url_pattern="   ",
+            username_secret=recipe.username_secret,
+            password_secret=recipe.password_secret,
+        )
+
+
+def test_login_recipe_accepts_extra_totp_field() -> None:
+    from openbola.capture import LoginRecipe, LoginSecretField
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    recipe = LoginRecipe(
+        name="staging-portal",
+        start_url="https://app.example.test/login",
+        username_selector="#email",
+        password_selector="#password",  # noqa: S106 - CSS selector, not a secret
+        submit_selector="#submit",
+        success_url_pattern="**/dashboard",
+        username_secret=registry.store_secret(purpose="username", value="alice"),
+        password_secret=registry.store_secret(purpose="password", value="hunter2"),
+        extra_secret_fields=(
+            LoginSecretField(
+                selector="#otp",
+                secret=registry.store_secret(
+                    purpose="totp_seed", value="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+                ),
+                kind="totp",
+            ),
+        ),
+    )
+    assert recipe.extra_secret_fields[0].kind == "totp"

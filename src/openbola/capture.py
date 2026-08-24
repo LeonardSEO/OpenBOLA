@@ -12,9 +12,10 @@ from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from openbola.handles import SecretHandle
 from openbola.models import RequestRecord
 from openbola.scope import ScopeDecision, ScopeError, ScopeGuard
 
@@ -62,6 +63,64 @@ class CaptureConfig:
             raise CaptureError("interactive_login requires headless=False")
         if self.max_har_bytes <= 0:
             raise CaptureError("max_har_bytes must be greater than zero")
+
+
+_LOGIN_SECRET_FIELD_KINDS = frozenset({"static", "totp"})
+
+
+@dataclass(frozen=True)
+class LoginSecretField:
+    """One extra credential-bearing field a login recipe fills, e.g. a TOTP code."""
+
+    selector: str
+    secret: SecretHandle
+    kind: Literal["static", "totp"] = "static"
+
+    def __post_init__(self) -> None:
+        if not self.selector.strip():
+            raise CaptureError("LoginSecretField selector must not be empty")
+        if not isinstance(self.secret, SecretHandle):
+            raise CaptureError("LoginSecretField secret must be a SecretHandle")
+        if self.kind not in _LOGIN_SECRET_FIELD_KINDS:
+            allowed = sorted(_LOGIN_SECRET_FIELD_KINDS)
+            raise CaptureError(f"LoginSecretField kind must be one of {allowed}")
+
+
+@dataclass(frozen=True)
+class LoginRecipe:
+    """Selectors, URL patterns, and secret handles for one automated login flow."""
+
+    name: str
+    start_url: str = field(repr=False)
+    username_selector: str
+    password_selector: str
+    submit_selector: str
+    success_url_pattern: str
+    username_secret: SecretHandle
+    password_secret: SecretHandle
+    extra_secret_fields: tuple[LoginSecretField, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise CaptureError("LoginRecipe name must not be empty")
+        try:
+            _validate_target_url(self.start_url)
+        except CaptureError as exc:
+            raise CaptureError("LoginRecipe start_url is unsafe") from exc
+        for field_name in ("username_selector", "password_selector", "submit_selector"):
+            if not getattr(self, field_name).strip():
+                raise CaptureError(f"LoginRecipe {field_name} must not be empty")
+        if not self.success_url_pattern.strip():
+            raise CaptureError("LoginRecipe success_url_pattern must not be empty")
+        for secret_field_name in ("username_secret", "password_secret"):
+            if not isinstance(getattr(self, secret_field_name), SecretHandle):
+                raise CaptureError(f"LoginRecipe {secret_field_name} must be a SecretHandle")
+        if not isinstance(self.extra_secret_fields, tuple) or not all(
+            isinstance(item, LoginSecretField) for item in self.extra_secret_fields
+        ):
+            raise CaptureError(
+                "LoginRecipe extra_secret_fields must be a tuple of LoginSecretField"
+            )
 
 
 class CaptureCollector(Protocol):
