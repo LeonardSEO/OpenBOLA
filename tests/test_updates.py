@@ -8,16 +8,20 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 
+from openbola.scope import ScopeGuard
 from openbola.updates import (
     CACHE_FILENAME,
     GITHUB_API_RELEASE_URL,
     MAX_ARTIFACT_BYTES,
+    UpdateError,
     UpdateService,
     apply_update,
     artifact_name,
     check_for_update,
     detect_platform,
+    normalize_version,
 )
 
 CURRENT = "0.1.0"
@@ -112,6 +116,31 @@ def _clock(hour: int = 12) -> datetime:
     return datetime(2026, 8, 24, hour, tzinfo=UTC)
 
 
+def _scope_guard(root: Path) -> ScopeGuard:
+    path = root / "distribution-scope.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "client_name": "OpenBOLA distribution",
+                "authorization_reference": "OPENBOLA-RELEASE-CHECK",
+                "confirmed": True,
+                "starts_at": "2020-01-01T00:00:00Z",
+                "expires_at": "2030-01-01T00:00:00Z",
+                "allowed_hosts": ["api.github.com", "github.com"],
+                "allowed_cidrs": [],
+                "allowed_paths": [
+                    "glob:/repos/LeonardSEO/openbola/releases/latest",
+                    "glob:/LeonardSEO/openbola/releases/download/**",
+                ],
+                "read_methods": ["GET"],
+                "mutation_grants": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return ScopeGuard.from_file(path)
+
+
 def _executable(root: Path, content: bytes = b"old executable") -> Path:
     path = root / "openbola"
     path.write_bytes(content)
@@ -126,6 +155,7 @@ def test_current_release_is_a_safe_noop_and_cache_suppresses_second_check(tmp_pa
         current_version=CURRENT,
         root=tmp_path / "state",
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
         clock=lambda: _clock(),
@@ -149,6 +179,7 @@ def test_newer_release_is_available_and_force_check_bypasses_cache(tmp_path: Pat
         current_version=CURRENT,
         root=tmp_path / "state",
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
         clock=lambda: _clock(),
@@ -176,6 +207,7 @@ def test_unsupported_platform_does_not_make_a_request(
         current_version=CURRENT,
         data_root=tmp_path / "state",
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system=system,
         machine=machine,
     )
@@ -191,6 +223,7 @@ def test_every_redirect_response_is_rejected_without_following_it(tmp_path: Path
         current_version=CURRENT,
         data_root=tmp_path / "state",
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
     )
@@ -206,6 +239,7 @@ def test_non_github_asset_url_is_rejected_before_download(tmp_path: Path) -> Non
         current_version=CURRENT,
         data_root=tmp_path / "state",
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
     )
@@ -226,6 +260,7 @@ def test_duplicate_release_json_keys_fail_closed_without_echoing_body(tmp_path: 
         current_version=CURRENT,
         data_root=tmp_path / "state",
         transport=httpx.MockTransport(handler),
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
     )
@@ -248,6 +283,7 @@ def test_missing_checksum_is_refused_and_old_executable_is_untouched(tmp_path: P
         data_root=tmp_path / "state",
         executable=executable,
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
     )
@@ -267,6 +303,7 @@ def test_checksum_mismatch_leaves_executable_byte_for_byte_unchanged(tmp_path: P
         data_root=tmp_path / "state",
         executable=executable,
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
     )
@@ -285,6 +322,7 @@ def test_declined_confirmation_does_not_replace_executable(tmp_path: Path) -> No
         data_root=tmp_path / "state",
         executable=executable,
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
     )
@@ -303,6 +341,7 @@ def test_yes_replaces_atomically_and_preserves_executable_mode(tmp_path: Path) -
         data_root=tmp_path / "state",
         executable=executable,
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
     )
@@ -331,6 +370,7 @@ def test_replacement_failure_preserves_old_executable(
         data_root=tmp_path / "state",
         executable=executable,
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
     )
@@ -350,6 +390,7 @@ def test_symlink_executable_is_refused(tmp_path: Path) -> None:
         data_root=tmp_path / "state",
         executable=link,
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
     )
@@ -365,6 +406,7 @@ def test_oversized_artifact_is_rejected_from_declared_size(tmp_path: Path) -> No
         current_version=CURRENT,
         data_root=tmp_path / "state",
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
     )
@@ -385,6 +427,7 @@ def test_cache_is_not_followed_when_stale(tmp_path: Path) -> None:
         current_version=CURRENT,
         root=root,
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
         clock=lambda: _clock(12),
@@ -407,7 +450,108 @@ def test_result_does_not_contain_release_body_or_local_secret(tmp_path: Path) ->
         current_version=CURRENT,
         data_root=tmp_path / "state",
         transport=transport,
+        scope_guard=_scope_guard(tmp_path),
         system="darwin",
         machine="arm64",
     )
     assert body_sentinel not in repr(result)
+
+
+def test_missing_distribution_scope_fails_closed_before_http(tmp_path: Path) -> None:
+    transport, calls = _transport(_release_payload())
+    result = check_for_update(
+        force_check=True,
+        current_version=CURRENT,
+        data_root=tmp_path / "state",
+        transport=transport,
+        system="darwin",
+        machine="arm64",
+    )
+    assert result.status == "unavailable"
+    assert result.reason_code == "scope_required"
+    assert calls == []
+
+
+def test_asset_path_must_match_raw_release_tag_and_filename(tmp_path: Path) -> None:
+    payload = _release_payload(
+        artifact_url=(
+            "https://github.com/LeonardSEO/openbola/releases/download/v0.1.0/"
+            + ARTIFACT_NAME
+        )
+    )
+    transport, calls = _transport(payload)
+    result = check_for_update(
+        force_check=True,
+        current_version=CURRENT,
+        data_root=tmp_path / "state",
+        transport=transport,
+        scope_guard=_scope_guard(tmp_path),
+        system="darwin",
+        machine="arm64",
+    )
+    assert result.reason_code == "url_denied"
+    assert calls == [GITHUB_API_RELEASE_URL]
+
+
+def test_outer_and_asset_json_allowlists_reject_extra_fields(tmp_path: Path) -> None:
+    payload = _release_payload()
+    payload["unexpected"] = "RELEASE_BODY_SENTINEL"
+    transport, _ = _transport(payload)
+    result = check_for_update(
+        force_check=True,
+        current_version=CURRENT,
+        data_root=tmp_path / "state",
+        transport=transport,
+        scope_guard=_scope_guard(tmp_path),
+        system="darwin",
+        machine="arm64",
+    )
+    assert result.reason_code == "malformed_release"
+    assert "RELEASE_BODY_SENTINEL" not in repr(result)
+
+
+def test_semver_rejects_numeric_prerelease_leading_zero_and_orders_numbers(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(UpdateError):
+        normalize_version("1.0.0-01")
+    payload = _release_payload(tag="v1.0.0-10")
+    transport, _ = _transport(payload)
+    result = check_for_update(
+        force_check=True,
+        current_version="1.0.0-2",
+        data_root=tmp_path / "state",
+        transport=transport,
+        scope_guard=_scope_guard(tmp_path),
+        system="darwin",
+        machine="arm64",
+    )
+    assert result.status == "available"
+
+
+def test_future_or_inconsistent_cache_is_ignored(tmp_path: Path) -> None:
+    transport, calls = _transport(_release_payload())
+    root = tmp_path / "state"
+    root.mkdir()
+    (root / CACHE_FILENAME).write_text(
+        json.dumps(
+            {
+                "checked_at": (_clock(12) + timedelta(hours=1)).isoformat(),
+                "status": "current",
+                "current_version": CURRENT,
+                "candidate_version": CURRENT,
+                "reason_code": None,
+            }
+        )
+    )
+    service = UpdateService(
+        current_version=CURRENT,
+        root=root,
+        transport=transport,
+        scope_guard=_scope_guard(tmp_path),
+        system="darwin",
+        machine="arm64",
+        clock=lambda: _clock(12),
+    )
+    assert service.check().status == "available"
+    assert calls == [GITHUB_API_RELEASE_URL]

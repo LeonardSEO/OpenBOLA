@@ -28,6 +28,7 @@ import httpx
 
 from openbola import __version__
 from openbola.paths import data_root as _default_data_root
+from openbola.scope import ScopeDecision, ScopeError, ScopeGuard
 
 Platform = Literal["windows-x64", "macos-arm64", "macos-x64"]
 UpdateStatus = Literal["current", "available", "updated", "denied", "unavailable"]
@@ -54,6 +55,8 @@ _SEMVER_RE: Final = re.compile(
 )
 _SHA256_RE: Final = re.compile(r"^[0-9a-fA-F]{64}$")
 _REASON_RE: Final = re.compile(r"^[a-z0-9_]{1,64}$")
+_RELEASE_KEYS: Final = frozenset({"tag_name", "assets"})
+_ASSET_KEYS: Final = frozenset({"name", "browser_download_url", "size"})
 
 
 @dataclass(frozen=True)
@@ -146,26 +149,60 @@ def normalize_version(value: str) -> str:
     if not isinstance(value, str):
         raise UpdateError("invalid_version")
     normalized = value[1:] if value.startswith(("v", "V")) else value
-    if _SEMVER_RE.fullmatch(normalized) is None:
+    match = _SEMVER_RE.fullmatch(normalized)
+    if match is None:
         raise UpdateError("invalid_version")
+    suffix = match.group("suffix")
+    if suffix:
+        for identifier in suffix[1:].split("."):
+            if identifier.isdecimal() and len(identifier) > 1 and identifier.startswith("0"):
+                raise UpdateError("invalid_version")
     return normalized
 
 
-def _version_key(value: str) -> tuple[int, int, int, int, str]:
+def _version_parts(value: str) -> tuple[int, int, int, tuple[str, ...]]:
     normalized = normalize_version(value)
     match = _SEMVER_RE.fullmatch(normalized)
     assert match is not None
-    suffix = match.group("suffix") or ""
-    # Stable releases sort after prereleases.  The lexical suffix order is
-    # deterministic and is sufficient for deciding whether a release is
-    # newer without pretending to implement arbitrary SemVer precedence.
+    suffix = match.group("suffix")
+    identifiers = tuple(suffix[1:].split(".")) if suffix else ()
+    for identifier in identifiers:
+        if identifier.isdecimal() and len(identifier) > 1 and identifier.startswith("0"):
+            raise UpdateError("invalid_version")
     return (
         int(match.group("major")),
         int(match.group("minor")),
         int(match.group("patch")),
-        0 if suffix else 1,
-        suffix,
+        identifiers,
     )
+
+
+def _compare_versions(left: str, right: str) -> int:
+    left_major, left_minor, left_patch, left_pre = _version_parts(left)
+    right_major, right_minor, right_patch, right_pre = _version_parts(right)
+    left_core = (left_major, left_minor, left_patch)
+    right_core = (right_major, right_minor, right_patch)
+    if left_core != right_core:
+        return 1 if left_core > right_core else -1
+    if not left_pre and not right_pre:
+        return 0
+    if not left_pre:
+        return 1
+    if not right_pre:
+        return -1
+    for left_identifier, right_identifier in zip(left_pre, right_pre, strict=False):
+        if left_identifier == right_identifier:
+            continue
+        left_numeric = left_identifier.isdecimal()
+        right_numeric = right_identifier.isdecimal()
+        if left_numeric and right_numeric:
+            return 1 if int(left_identifier) > int(right_identifier) else -1
+        if left_numeric != right_numeric:
+            return -1 if left_numeric else 1
+        return 1 if left_identifier > right_identifier else -1
+    if len(left_pre) == len(right_pre):
+        return 0
+    return 1 if len(left_pre) > len(right_pre) else -1
 
 
 def detect_platform(*, system: str | None = None, machine: str | None = None) -> Platform:
@@ -203,14 +240,17 @@ def _allowed_url(url: str, *, kind: Literal["api", "release"]) -> str:
         raise UpdateError("url_denied")
     if _port(parts) not in {None, 443}:
         raise UpdateError("url_denied")
-    hostname = (parts.hostname or "").casefold().rstrip(".")
+    hostname = (parts.hostname or "").casefold()
+    expected_host = GITHUB_API_ORIGIN if kind == "api" else GITHUB_WEB_ORIGIN
+    if parts.netloc.casefold() != expected_host:
+        raise UpdateError("url_denied")
     if kind == "api":
         expected_path = f"/repos{REPOSITORY_PATH}/releases/latest"
-        if hostname != GITHUB_API_ORIGIN or parts.path != expected_path:
+        if hostname != expected_host or parts.path != expected_path:
             raise UpdateError("url_denied")
     else:
         prefix = f"{REPOSITORY_PATH}/releases/download/"
-        if hostname != GITHUB_WEB_ORIGIN or not parts.path.startswith(prefix):
+        if hostname != expected_host or not parts.path.startswith(prefix):
             raise UpdateError("url_denied")
         suffix = parts.path[len(prefix) :]
         segments = suffix.split("/")
@@ -227,11 +267,14 @@ def _allowed_url(url: str, *, kind: Literal["api", "release"]) -> str:
     return parts.geturl()
 
 
-def _asset_url(url: object) -> str:
+def _asset_url(url: object, *, expected_path: str) -> str:
     if not isinstance(url, str):
         raise UpdateError("malformed_release")
     try:
-        return _allowed_url(url, kind="release")
+        validated = _allowed_url(url, kind="release")
+        if urlsplit(validated).path != expected_path:
+            raise UpdateError("url_denied")
+        return validated
     except UpdateError as error:
         if error.code == "url_denied":
             raise UpdateError("url_denied") from error
@@ -257,6 +300,8 @@ def _json_size(mapping: Mapping[str, object]) -> int:
 def _parse_release(payload: object, *, target: Platform, current_version: str) -> _Release:
     if not isinstance(payload, dict):
         raise UpdateError("malformed_release")
+    if frozenset(payload) != _RELEASE_KEYS:
+        raise UpdateError("malformed_release")
     tag = _json_string(payload, "tag_name")
     version = normalize_version(tag)
     assets_value = payload.get("assets")
@@ -268,6 +313,8 @@ def _parse_release(payload: object, *, target: Platform, current_version: str) -
     seen_names: set[str] = set()
     for item in assets_value:
         if not isinstance(item, dict):
+            raise UpdateError("malformed_release")
+        if frozenset(item) != _ASSET_KEYS:
             raise UpdateError("malformed_release")
         name_value = item.get("name")
         if not isinstance(name_value, str) or not name_value or name_value in seen_names:
@@ -281,11 +328,20 @@ def _parse_release(payload: object, *, target: Platform, current_version: str) -
         raise UpdateError("artifact_missing")
     if checksums is None:
         raise UpdateError("checksum_missing")
-    selected_url = _asset_url(selected.get("browser_download_url"))
-    checksums_url = _asset_url(checksums.get("browser_download_url"))
+    release_prefix = f"{REPOSITORY_PATH}/releases/download/{tag}"
+    expected_artifact_path = f"{release_prefix}/{expected_name}"
+    expected_checksums_path = f"{release_prefix}/{CHECKSUMS_NAME}"
+    selected_url = _asset_url(
+        selected.get("browser_download_url"),
+        expected_path=expected_artifact_path,
+    )
+    checksums_url = _asset_url(
+        checksums.get("browser_download_url"),
+        expected_path=expected_checksums_path,
+    )
     size = _json_size(selected)
     # Do not carry URLs or arbitrary metadata beyond this typed boundary.
-    if _version_key(version) <= _version_key(current_version):
+    if _compare_versions(version, current_version) <= 0:
         # The artifact is still parsed so malformed current releases fail
         # closed, but callers can return ``current`` without downloading it.
         pass
@@ -319,14 +375,40 @@ def _parse_checksum(data: bytes, *, filename: str) -> str:
     return matches[0]
 
 
+def _scoped_url(scope_guard: ScopeGuard | None, url: str) -> str:
+    """Return the canonical URL only after a concrete scope decision."""
+
+    if not isinstance(scope_guard, ScopeGuard):
+        raise UpdateError("scope_required")
+    try:
+        decision = scope_guard.require_allowed(url, "GET")
+    except ScopeError as error:
+        raise UpdateError("scope_denied") from error
+    if not isinstance(decision, ScopeDecision):
+        raise UpdateError("scope_denied")
+    return decision.canonical_url
+
+
+def _reject_redirect(response: httpx.Response, scope_guard: ScopeGuard | None) -> None:
+    if response.status_code not in {301, 302, 303, 307, 308}:
+        return
+    location = response.headers.get("location")
+    if location:
+        try:
+            _scoped_url(scope_guard, location)
+        except UpdateError as error:
+            raise UpdateError("redirect_denied") from error
+    raise UpdateError("redirect_denied")
+
+
 def _response_bytes(
     response: httpx.Response,
     *,
     max_bytes: int,
     too_large_code: str = "response_too_large",
+    scope_guard: ScopeGuard | None = None,
 ) -> bytes:
-    if response.status_code in {301, 302, 303, 307, 308}:
-        raise UpdateError("redirect_denied")
+    _reject_redirect(response, scope_guard)
     if response.status_code != 200:
         raise UpdateError("release_unavailable")
     content_length = response.headers.get("content-length")
@@ -348,9 +430,23 @@ def _response_bytes(
 
 
 def _safe_cache_path(root: Path) -> Path:
-    if root.exists() and root.is_symlink():
+    if _path_contains_symlink(root):
         raise UpdateError("cache_untrusted")
     return root / CACHE_FILENAME
+
+
+def _path_contains_symlink(path: Path) -> bool:
+    try:
+        absolute = path.absolute()
+        current = Path(absolute.anchor or Path.cwd().anchor or ".")
+        parts = absolute.parts[1:] if absolute.anchor else absolute.parts
+        for component in parts:
+            current /= component
+            if current.is_symlink():
+                return True
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return False
 
 
 def _read_cache(root: Path, *, current_version: str, now: datetime) -> UpdateResult | None:
@@ -376,6 +472,8 @@ def _read_cache(root: Path, *, current_version: str, now: datetime) -> UpdateRes
             return None
         if now - timestamp.astimezone(UTC) >= CACHE_TTL:
             return None
+        if timestamp.astimezone(UTC) > now:
+            return None
         cached_current = payload.get("current_version")
         if cached_current != current_version:
             return None
@@ -395,6 +493,14 @@ def _read_cache(root: Path, *, current_version: str, now: datetime) -> UpdateRes
                 return None
         if reason is not None and _REASON_RE.fullmatch(reason) is None:
             return None
+        if status == "current" and candidate != current_version:
+            return None
+        if status == "available" and (
+            candidate is None or _compare_versions(candidate, current_version) <= 0
+        ):
+            return None
+        if status == "unavailable" and candidate is not None:
+            return None
         return UpdateResult(cast(UpdateStatus, status), current_version, candidate, reason)
     except (OSError, TypeError, ValueError, UpdateError):
         return None
@@ -404,12 +510,12 @@ def _write_cache(root: Path, result: UpdateResult, *, now: datetime) -> None:
     if result.status not in {"current", "available", "unavailable"}:
         return
     try:
-        if root.exists() and root.is_symlink():
+        if _path_contains_symlink(root):
             return
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(root, 0o700)
         cache_path = _safe_cache_path(root)
-        if cache_path.exists() and cache_path.is_symlink():
+        if _path_contains_symlink(cache_path):
             return
         payload = {
             "checked_at": now.astimezone(UTC).isoformat(),
@@ -454,12 +560,7 @@ def _current_executable(path: Path | None) -> Path:
         resolved = candidate.absolute()
     except OSError as error:
         raise UpdateError("executable_invalid") from error
-    if (
-        resolved.is_symlink()
-        or not resolved.is_file()
-        or resolved.parent.is_symlink()
-        or not resolved.parent.is_dir()
-    ):
+    if resolved.is_symlink() or not resolved.is_file() or _path_contains_symlink(resolved.parent):
         raise UpdateError("executable_invalid")
     return resolved
 
@@ -470,12 +571,12 @@ def _download_to_temp(
     *,
     directory: Path,
     expected_size: int,
+    scope_guard: ScopeGuard | None = None,
 ) -> tuple[Path, str, int]:
     temporary: Path | None = None
     try:
         with client.stream("GET", url) as response:
-            if response.status_code in {301, 302, 303, 307, 308}:
-                raise UpdateError("redirect_denied")
+            _reject_redirect(response, scope_guard)
             if response.status_code != 200:
                 raise UpdateError("download_failed")
             content_length = response.headers.get("content-length")
@@ -551,6 +652,7 @@ class UpdateService:
         root: Path | None = None,
         executable: Path | None = None,
         transport: httpx.BaseTransport | None = None,
+        scope_guard: ScopeGuard | None = None,
         system: str | None = None,
         machine: str | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -560,6 +662,7 @@ class UpdateService:
         self.root = root
         self.executable = executable
         self.transport = transport
+        self.scope_guard = scope_guard
         self.system = system
         self.machine = machine
         self.clock = clock or (lambda: datetime.now(UTC))
@@ -582,12 +685,17 @@ class UpdateService:
         )
 
     def _fetch_release(self, target: Platform) -> _Release:
-        _allowed_url(GITHUB_API_RELEASE_URL, kind="api")
+        request_url = _allowed_url(GITHUB_API_RELEASE_URL, kind="api")
+        request_url = _scoped_url(self.scope_guard, request_url)
         try:
             with self._client() as client:
-                with client.stream("GET", GITHUB_API_RELEASE_URL) as response:
+                with client.stream("GET", request_url) as response:
                     payload = _parse_json(
-                        _response_bytes(response, max_bytes=MAX_RELEASE_BYTES),
+                        _response_bytes(
+                            response,
+                            max_bytes=MAX_RELEASE_BYTES,
+                            scope_guard=self.scope_guard,
+                        ),
                         max_bytes=MAX_RELEASE_BYTES,
                     )
                 release = _parse_release(
@@ -607,7 +715,7 @@ class UpdateService:
             release = self._fetch_release(target)
             status: UpdateStatus
             reason: str | None = None
-            if _version_key(release.version) > _version_key(self.current_version):
+            if _compare_versions(release.version, self.current_version) > 0:
                 status = "available"
             else:
                 status = "current"
@@ -630,7 +738,7 @@ class UpdateService:
         try:
             target = detect_platform(system=self.system, machine=self.machine)
             release = self._fetch_release(target)
-            if _version_key(release.version) <= _version_key(self.current_version):
+            if _compare_versions(release.version, self.current_version) <= 0:
                 result = UpdateResult("current", self.current_version, release.version)
                 _write_cache(self._root(), result, now=self.clock().astimezone(UTC))
                 return result
@@ -639,11 +747,13 @@ class UpdateService:
             # Validate and download the checksum file before touching the
             # executable.  The two assets are fetched from the same release.
             with self._client() as client:
-                with client.stream("GET", release.checksums_url) as response:
+                checksum_url = _scoped_url(self.scope_guard, release.checksums_url)
+                with client.stream("GET", checksum_url) as response:
                     checksum_data = _response_bytes(
                         response,
                         max_bytes=MAX_CHECKSUM_BYTES,
                         too_large_code="checksum_too_large",
+                        scope_guard=self.scope_guard,
                     )
                 checksum = _parse_checksum(
                     checksum_data,
@@ -662,9 +772,10 @@ class UpdateService:
                 )
                 temporary, digest, _ = _download_to_temp(
                     client,
-                    release.artifact.download_url,
+                    _scoped_url(self.scope_guard, release.artifact.download_url),
                     directory=executable.parent,
                     expected_size=release.artifact.size,
+                    scope_guard=self.scope_guard,
                 )
             if digest.casefold() != release.artifact.sha256.casefold():
                 _remove_temporary(temporary)
@@ -706,6 +817,7 @@ def check_for_update(
     data_root: Path | None = None,
     executable: Path | None = None,
     transport: httpx.BaseTransport | None = None,
+    scope_guard: ScopeGuard | None = None,
     system: str | None = None,
     machine: str | None = None,
     clock: Callable[[], datetime] | None = None,
@@ -717,6 +829,7 @@ def check_for_update(
         root=data_root,
         executable=executable,
         transport=transport,
+        scope_guard=scope_guard,
         system=system,
         machine=machine,
         clock=clock,
@@ -730,6 +843,7 @@ def apply_update(
     data_root: Path | None = None,
     executable: Path | None = None,
     transport: httpx.BaseTransport | None = None,
+    scope_guard: ScopeGuard | None = None,
     system: str | None = None,
     machine: str | None = None,
     clock: Callable[[], datetime] | None = None,
@@ -742,6 +856,7 @@ def apply_update(
         root=data_root,
         executable=executable,
         transport=transport,
+        scope_guard=scope_guard,
         system=system,
         machine=machine,
         clock=clock,
