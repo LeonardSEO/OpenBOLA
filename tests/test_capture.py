@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from openbola.capture import CaptureConfig, CaptureError, parse_har_records
+from openbola.models import RequestRecord
 from openbola.scope import ScopeGuard
 
 
@@ -1303,3 +1304,95 @@ def test_capture_har_login_post_body_is_sanitized_in_output(
     assert entry["request"]["method"] == "POST"
     assert entry["request"]["postData"]["text"] == "[REDACTED]"
     assert entry["response"]["status"] == 302
+
+
+def test_in_session_capture_exposes_raw_material_only_via_session_handles(tmp_path: Path) -> None:
+    from openbola.capture import InSessionCapture, SessionExchange
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    har_path = tmp_path / "capture.har"
+    har_path.write_text('{"log":{"entries":[]}}', encoding="utf-8")
+    safe = RequestRecord("alice", "GET", "https://api.example.test/v1/items/[REDACTED]")
+    request_handle = registry.store_value(kind="session_state", value=object())
+    response_handle = registry.store_value(kind="session_state", value=object())
+    state_handle = registry.store_value(kind="session_state", value={"cookies": []})
+    exchange = SessionExchange(safe, request_handle, response_handle)
+
+    capture = InSessionCapture(har_path, (exchange,), state_handle, registry)
+
+    assert "FULL_VALUE_SENTINEL" not in repr(capture)
+    assert capture.exchanges[0].record.url.endswith("[REDACTED]")
+    with pytest.raises(CaptureError, match="request material"):
+        capture.request_material(exchange)
+    with pytest.raises(TypeError, match="serialization"):
+        import pickle
+
+        pickle.dumps(capture)
+
+
+def test_in_session_capture_close_revokes_every_handle(tmp_path: Path) -> None:
+    from openbola.capture import (
+        InSessionCapture,
+        SessionExchange,
+        SessionRequestMaterial,
+        SessionResponseMaterial,
+    )
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    har_path = tmp_path / "capture.har"
+    har_path.write_text('{"log":{"entries":[]}}', encoding="utf-8")
+    request_handle = registry.store_value(
+        kind="session_state",
+        value=SessionRequestMaterial("https://api.example.test/v1/items/42", {}, None),
+    )
+    response_handle = registry.store_value(
+        kind="session_state", value=SessionResponseMaterial(200, {}, b"FULL_VALUE_SENTINEL")
+    )
+    state_handle = registry.store_value(kind="session_state", value={"cookies": []})
+    exchange = SessionExchange(
+        RequestRecord("alice", "GET", "https://api.example.test/v1/items/42"),
+        request_handle,
+        response_handle,
+    )
+    capture = InSessionCapture(har_path, (exchange,), state_handle, registry)
+
+    assert capture.response_material(exchange).body == b"FULL_VALUE_SENTINEL"
+    capture.close()
+    with pytest.raises(CaptureError, match="closed"):
+        capture.response_material(exchange)
+    with pytest.raises(RuntimeError, match="registry is closed"):
+        registry.resolve_value(response_handle)
+
+
+def test_in_session_capture_rejects_malformed_resolved_material(tmp_path: Path) -> None:
+    from openbola.capture import (
+        InSessionCapture,
+        SessionExchange,
+        SessionRequestMaterial,
+        SessionResponseMaterial,
+    )
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    har_path = tmp_path / "capture.har"
+    har_path.write_text('{"log":{"entries":[]}}', encoding="utf-8")
+    request_handle = registry.store_value(
+        kind="session_state",
+        value=SessionRequestMaterial(42, {}, None),  # type: ignore[arg-type]
+    )
+    response_handle = registry.store_value(
+        kind="session_state",
+        value=SessionResponseMaterial(200, {}, None),
+    )
+    state_handle = registry.store_value(kind="session_state", value={"cookies": []})
+    exchange = SessionExchange(
+        RequestRecord("alice", "GET", "https://api.example.test/v1/items/[REDACTED]"),
+        request_handle,
+        response_handle,
+    )
+    capture = InSessionCapture(har_path, (exchange,), state_handle, registry)
+
+    with pytest.raises(CaptureError, match="request material"):
+        capture.request_material(exchange)

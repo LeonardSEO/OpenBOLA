@@ -13,14 +13,15 @@ import secrets
 import stat
 import struct
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NoReturn, Protocol, TypeVar
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from openbola.handles import SecretHandle
+from openbola.discovery import ResourceInventory
+from openbola.handles import SecretHandle, SessionValueStore, ValueHandle
 from openbola.models import RequestRecord
 from openbola.scope import ScopeDecision, ScopeError, ScopeGuard
 
@@ -131,6 +132,199 @@ class LoginRecipe:
             raise CaptureError(
                 "LoginRecipe extra_secret_fields must be a tuple of LoginSecretField"
             )
+
+
+@dataclass(frozen=True)
+class SessionRequestMaterial:
+    """Raw request data retained only in an active session value store."""
+
+    url: str = field(repr=False)
+    headers: Mapping[str, str] = field(repr=False)
+    body: bytes | None = field(repr=False)
+
+
+@dataclass(frozen=True)
+class SessionResponseMaterial:
+    """Raw response data retained only in an active session value store."""
+
+    status: int
+    headers: Mapping[str, str] = field(repr=False)
+    body: bytes | None = field(repr=False)
+
+
+@dataclass(frozen=True)
+class SessionExchange:
+    """A sanitized record and opaque handles to its full-fidelity material."""
+
+    record: RequestRecord
+    request_material_handle: ValueHandle
+    response_material_handle: ValueHandle
+
+
+_SessionMaterial = TypeVar("_SessionMaterial", SessionRequestMaterial, SessionResponseMaterial)
+
+
+@dataclass(frozen=True, init=False)
+class InSessionCapture:
+    """Handle-only view of full-fidelity capture data for one active session."""
+
+    har_path: Path
+    exchanges: tuple[SessionExchange, ...]
+    browser_state_handle: ValueHandle
+    _registry: SessionValueStore = field(init=False, repr=False, compare=False)
+    _closed: bool = field(init=False, repr=False, compare=False)
+
+    def __init__(
+        self,
+        har_path: Path,
+        exchanges: tuple[SessionExchange, ...],
+        browser_state_handle: ValueHandle,
+        registry: SessionValueStore,
+    ) -> None:
+        if not isinstance(har_path, Path) or not har_path.is_file() or har_path.is_symlink():
+            raise CaptureError("capture HAR path must be a regular non-symlink file")
+        if not isinstance(exchanges, tuple) or not exchanges:
+            raise CaptureError("capture exchanges must be a non-empty tuple")
+        if not isinstance(registry, SessionValueStore):
+            raise CaptureError("capture registry must be a SessionValueStore")
+        for exchange in exchanges:
+            if not isinstance(exchange, SessionExchange) or not isinstance(
+                exchange.record, RequestRecord
+            ):
+                raise CaptureError("capture exchanges must contain SessionExchange records")
+            self._require_session_handle(exchange.request_material_handle, "request material")
+            self._require_session_handle(exchange.response_material_handle, "response material")
+        self._require_session_handle(browser_state_handle, "browser state")
+
+        object.__setattr__(self, "har_path", har_path)
+        object.__setattr__(self, "exchanges", exchanges)
+        object.__setattr__(self, "browser_state_handle", browser_state_handle)
+        object.__setattr__(self, "_registry", registry)
+        object.__setattr__(self, "_closed", False)
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError("InSessionCapture serialization is disabled.")
+
+    def request_material(self, exchange: SessionExchange) -> SessionRequestMaterial:
+        self._require_open()
+        owned_exchange = self._require_owned_exchange(exchange)
+        return self._resolve_material(
+            owned_exchange.request_material_handle,
+            SessionRequestMaterial,
+            "request material",
+        )
+
+    def response_material(self, exchange: SessionExchange) -> SessionResponseMaterial:
+        self._require_open()
+        owned_exchange = self._require_owned_exchange(exchange)
+        return self._resolve_material(
+            owned_exchange.response_material_handle,
+            SessionResponseMaterial,
+            "response material",
+        )
+
+    def browser_state(self) -> Mapping[str, object]:
+        self._require_open()
+        value = self._resolve_value(self.browser_state_handle, "browser state")
+        if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+            raise CaptureError("browser state is malformed")
+        return value
+
+    def with_adapter_records(
+        self,
+        consumer: Callable[[Sequence[RequestRecord]], tuple[ResourceInventory, ...]],
+    ) -> tuple[ResourceInventory, ...]:
+        self._require_open()
+        raw_records: tuple[RequestRecord, ...] = ()
+        try:
+            raw_records = tuple(
+                RequestRecord(
+                    exchange.record.identity,
+                    exchange.record.method,
+                    request.url,
+                    request.headers,
+                    request.body,
+                    response.status,
+                    response.headers,
+                    response.body,
+                )
+                for exchange in self.exchanges
+                for request, response in [
+                    (self.request_material(exchange), self.response_material(exchange))
+                ]
+            )
+            try:
+                result = consumer(raw_records)
+            except Exception:
+                raise CaptureError("session adapter failed") from None
+            if not isinstance(result, tuple) or not all(
+                isinstance(item, ResourceInventory) for item in result
+            ):
+                raise CaptureError("session adapter result must be a ResourceInventory tuple")
+            return result
+        finally:
+            raw_records = ()
+
+    def close(self) -> None:
+        if not self._closed:
+            object.__setattr__(self, "_closed", True)
+            self._registry.close()
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise CaptureError("in-session capture is closed")
+
+    def _require_owned_exchange(self, exchange: SessionExchange) -> SessionExchange:
+        if not isinstance(exchange, SessionExchange) or not any(
+            exchange is owned_exchange for owned_exchange in self.exchanges
+        ):
+            raise CaptureError("exchange does not belong to this capture")
+        return exchange
+
+    @staticmethod
+    def _require_session_handle(handle: ValueHandle, label: str) -> None:
+        if not isinstance(handle, ValueHandle) or handle.kind != "session_state":
+            raise CaptureError(f"{label} handle must be a session_state handle")
+
+    def _resolve_value(self, handle: ValueHandle, label: str) -> object:
+        self._require_session_handle(handle, label)
+        try:
+            return self._registry.resolve_value(handle)
+        except Exception:
+            raise CaptureError(f"{label} is unavailable") from None
+
+    def _resolve_material(
+        self,
+        handle: ValueHandle,
+        expected_type: type[_SessionMaterial],
+        label: str,
+    ) -> _SessionMaterial:
+        value = self._resolve_value(handle, label)
+        if not isinstance(value, expected_type) or not self._is_well_formed_material(value):
+            raise CaptureError(f"{label} is malformed")
+        return value
+
+    @staticmethod
+    def _is_well_formed_material(
+        value: SessionRequestMaterial | SessionResponseMaterial,
+    ) -> bool:
+        try:
+            headers_are_valid = isinstance(value.headers, Mapping) and all(
+                isinstance(name, str) and isinstance(header_value, str)
+                for name, header_value in value.headers.items()
+            )
+            body_is_valid = value.body is None or isinstance(value.body, bytes)
+            if isinstance(value, SessionRequestMaterial):
+                return isinstance(value.url, str) and headers_are_valid and body_is_valid
+            return (
+                isinstance(value.status, int)
+                and not isinstance(value.status, bool)
+                and 0 <= value.status <= 999
+                and headers_are_valid
+                and body_is_valid
+            )
+        except Exception:
+            return False
 
 
 class CaptureCollector(Protocol):
