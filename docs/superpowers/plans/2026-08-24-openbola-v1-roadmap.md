@@ -183,6 +183,10 @@ plans before it.
    and the validator that intersects every proposed handle/method/field/path
    against observed inventory and confirmed scope (spec §5, acceptance
    criterion 5 — no credentials/cookies/raw IDs/full values ever leave).
+   *Status: complete, merged to main (2026-08-24). Acceptance checks:
+   `uv run pytest tests/test_ai.py tests/test_ai_clients.py
+   tests/test_ai_boundary.py -v`, `uv run ruff check .`, `uv run mypy src`,
+   and `uv run pytest`.*
 6. **P6 — All-record mutation verification & crash recovery**. Wire
    `MutationGrant` into the executor: snapshot → canary → verify → restore →
    verify-restore per record, `all_discovered` auto-expansion with no silent

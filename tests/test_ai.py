@@ -497,6 +497,20 @@ def test_validate_proposed_plan_binds_exact_candidate_and_checks_scope() -> None
     assert guard.calls == [("https://api.example.test/v1/documents/{id}", "GET")]
 
 
+def test_validate_proposed_plan_does_not_resolve_session_handles() -> None:
+    registry = InMemorySessionValueRegistry()
+    candidate = _planning_candidate()
+    plan = parse_proposed_plan(_proposed_json(candidate))
+    registry.close()
+
+    # Planning validation is deliberately structural. It remains usable after
+    # the process-local value registry closes and cannot turn a proposal into
+    # an operation by resolving a record ID or field value.
+    assert validate_proposed_plan(
+        plan, (candidate,), _RecordingScopeGuard(), "https://api.example.test"
+    ) == plan
+
+
 @pytest.mark.parametrize(
     "origin",
     [

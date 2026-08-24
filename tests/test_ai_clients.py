@@ -129,6 +129,11 @@ def test_openai_compatible_client_checks_provider_scope_and_never_sends_raw_valu
     assert RAW_ID not in rendered
     assert FULL_VALUE not in rendered
     assert API_KEY not in rendered
+    assert set(payload) == {"model", "temperature", "messages", "response_format"}
+    assert payload["response_format"]["type"] == "json_schema"
+    assert payload["response_format"]["json_schema"]["strict"] is True
+    assert set(payload["response_format"]["json_schema"]["schema"]["properties"]) == {"tests"}
+    assert "openbola-ai-context-v1" in rendered
     assert seen[0].headers["authorization"] == f"Bearer {API_KEY}"
     assert seen[0].headers["x-client"] == "openbola-test"
 
