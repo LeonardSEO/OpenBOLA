@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from typing import Protocol
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 
@@ -25,12 +25,31 @@ from openbola.ai import (
     parse_proposed_plan,
 )
 from openbola.handles import SessionValueRegistry
-from openbola.scope import ScopeGuard
+from openbola.scope import ScopeDecision, ScopeGuard
 
 MAX_PROVIDER_REQUEST_BYTES = 64 * 1024
 _MAX_CONTEXT_CANDIDATES = 100
 _MAX_CONTEXT_FIELDS = 100
 _MAX_CONTEXT_TEXT = 256
+_SAFE_STATIC_HEADERS = frozenset({"accept", "accept-encoding", "user-agent"})
+_BLOCKED_STATIC_HEADERS = frozenset(
+    {
+        "host",
+        ":authority",
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "content-length",
+        "content-type",
+        "forwarded",
+    }
+)
 
 
 class ProviderClientError(RuntimeError):
@@ -197,7 +216,7 @@ def _safe_context(context: Mapping[str, object]) -> dict[str, object]:
 
 def _provider_url(config: AIProviderConfig) -> str:
     if config.kind == "openai_compatible":
-        return f"{config.base_url}/chat/completions"
+        return f"{config.base_url}/v1/chat/completions"
     if config.azure_deployment is None or config.api_version is None:
         raise ProviderRequestError("Azure provider configuration is incomplete")
     deployment = quote(config.azure_deployment, safe="")
@@ -240,6 +259,62 @@ def _request_payload(config: AIProviderConfig, context: Mapping[str, object]) ->
     return payload
 
 
+def _validate_static_headers(config: AIProviderConfig) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for name, value in config.safe_headers.items():
+        normalized = name.casefold()
+        if normalized in _BLOCKED_STATIC_HEADERS or normalized.startswith("proxy-"):
+            raise ProviderRequestError("provider static headers contain a forbidden name")
+        if normalized not in _SAFE_STATIC_HEADERS and not normalized.startswith("x-"):
+            raise ProviderRequestError("provider static headers contain a non-allowlisted name")
+        if not isinstance(value, str) or any(
+            ord(character) < 32 or ord(character) == 127 for character in value
+        ):
+            raise ProviderRequestError("provider static headers contain an unsafe value")
+        headers[name] = value
+    return headers
+
+
+def _strict_json_document(raw: bytes) -> object:
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+            result: dict[str, object] = {}
+            seen: set[str] = set()
+            for key, value in items:
+                if key in seen:
+                    raise ValueError
+                seen.add(key)
+                result[key] = value
+            return result
+
+        def constant(_value: str) -> object:
+            raise ValueError
+
+        return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+    except (UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError):
+        raise ProviderResponseError("provider response is not valid JSON") from None
+
+
+def _validated_decision(decision: object) -> ScopeDecision:
+    if not isinstance(decision, ScopeDecision):
+        raise ProviderRequestError("provider request authorization is invalid")
+    if decision.connect_ips:
+        raise ProviderRequestError("provider peer authorization requires a pinned transport")
+    try:
+        parsed = urlsplit(decision.canonical_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ProviderRequestError("provider request authorization is invalid") from None
+    return decision
+
+
 class OpenAICompatibleClient:
     """Call an OpenAI-compatible chat endpoint through a provider ScopeGuard."""
 
@@ -256,8 +331,8 @@ class OpenAICompatibleClient:
             raise ValueError("OpenAI-compatible client requires an OpenAI-compatible config")
         if not hasattr(secrets, "resolve_secret"):
             raise TypeError("secrets must provide the SessionValueRegistry protocol")
-        if not hasattr(provider_scope_guard, "require_allowed"):
-            raise TypeError("provider_scope_guard must provide require_allowed")
+        if not isinstance(provider_scope_guard, ScopeGuard):
+            raise TypeError("provider_scope_guard must be a confirmed ScopeGuard")
         self._config = config
         self._secrets = secrets
         self._provider_scope_guard = provider_scope_guard
@@ -268,51 +343,71 @@ class OpenAICompatibleClient:
         payload = _request_payload(self._config, context)
         url = _provider_url(self._config)
         try:
-            decision = self._provider_scope_guard.require_allowed(url, "POST")
+            raw_decision = self._provider_scope_guard.require_allowed(url, "POST")
         except Exception:
             raise ProviderRequestError("provider request is not authorized") from None
+        decision = _validated_decision(raw_decision)
         request_url = getattr(decision, "canonical_url", url)
         try:
             api_key = self._secrets.resolve_secret(self._config.api_key)
         except Exception:
             raise ProviderCredentialError("provider credential cannot be resolved") from None
-        if not isinstance(api_key, str) or not api_key or any(
-            ord(character) < 32 or ord(character) == 127 for character in api_key
+        if (
+            not isinstance(api_key, str)
+            or not api_key
+            or not api_key.isascii()
+            or any(
+                ord(character) < 32
+                or ord(character) == 127
+                or character.isspace()
+                for character in api_key
+            )
         ):
             raise ProviderCredentialError("provider credential cannot be resolved")
 
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        headers.update(dict(self._config.safe_headers))
+        try:
+            headers.update(_validate_static_headers(self._config))
+        except ProviderRequestError:
+            raise
         try:
             with httpx.Client(
                 follow_redirects=False,
                 transport=self._transport,
                 timeout=self._timeout,
                 trust_env=False,
-            ) as client:
-                response = client.post(request_url, headers=headers, json=payload)
+            ) as client, client.stream(
+                "POST", request_url, headers=headers, json=payload
+            ) as response:
+                if 300 <= response.status_code < 400:
+                    location = response.headers.get("location")
+                    if location is not None:
+                        redirect_url = urljoin(request_url, location)
+                        try:
+                            _validated_decision(
+                                self._provider_scope_guard.require_allowed(
+                                    redirect_url, "POST"
+                                )
+                            )
+                        except Exception:
+                            raise ProviderRedirectError(
+                                "provider redirect is not authorized"
+                            ) from None
+                    raise ProviderRedirectError("provider redirects are not followed")
+                if not 200 <= response.status_code < 300:
+                    raise ProviderResponseError("provider returned an unsuccessful response")
+                body = bytearray()
+                for chunk in response.iter_bytes():
+                    body.extend(chunk)
+                    if len(body) > MAX_AI_OUTPUT_BYTES:
+                        raise ProviderResponseError(
+                            "provider response exceeds the maximum safe size"
+                        )
+                raw = bytes(body)
         except httpx.HTTPError:
             raise ProviderTransportError("provider transport failed") from None
-
-        if 300 <= response.status_code < 400:
-            location = response.headers.get("location")
-            if location is not None:
-                redirect_url = urljoin(request_url, location)
-                try:
-                    self._provider_scope_guard.require_allowed(redirect_url, "POST")
-                except Exception:
-                    raise ProviderRedirectError("provider redirect is not authorized") from None
-            raise ProviderRedirectError("provider redirects are not followed")
-        if not 200 <= response.status_code < 300:
-            raise ProviderResponseError("provider returned an unsuccessful response")
         try:
-            raw = response.content
-        except httpx.HTTPError:
-            raise ProviderTransportError("provider response could not be read") from None
-        if len(raw) > MAX_AI_OUTPUT_BYTES:
-            raise ProviderResponseError("provider response exceeds the maximum safe size")
-        try:
-            document = json.loads(raw)
+            document = _strict_json_document(raw)
             choices = document.get("choices") if isinstance(document, Mapping) else None
             first = choices[0] if isinstance(choices, Sequence) and choices else None
             message = first.get("message") if isinstance(first, Mapping) else None
@@ -343,8 +438,8 @@ class AzureOpenAIClient(OpenAICompatibleClient):
         self._config = config
         if not hasattr(secrets, "resolve_secret"):
             raise TypeError("secrets must provide the SessionValueRegistry protocol")
-        if not hasattr(provider_scope_guard, "require_allowed"):
-            raise TypeError("provider_scope_guard must provide require_allowed")
+        if not isinstance(provider_scope_guard, ScopeGuard):
+            raise TypeError("provider_scope_guard must be a confirmed ScopeGuard")
         self._secrets = secrets
         self._provider_scope_guard = provider_scope_guard
         self._transport = transport

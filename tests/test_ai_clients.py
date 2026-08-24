@@ -28,7 +28,13 @@ RAW_ID = "raw-record-id-sentinel"
 FULL_VALUE = "full-response-value-sentinel"
 
 
-def _scope(path: Path, *, host: str = "llm.example.test", allowed_path: str) -> ScopeGuard:
+def _scope(
+    path: Path,
+    *,
+    host: str = "llm.example.test",
+    allowed_path: str,
+    allowed_cidrs: list[str] | None = None,
+) -> ScopeGuard:
     path.write_text(
         yaml.safe_dump(
             {
@@ -38,7 +44,7 @@ def _scope(path: Path, *, host: str = "llm.example.test", allowed_path: str) -> 
                 "starts_at": "2026-08-24T10:00:00Z",
                 "expires_at": "2026-08-24T14:00:00Z",
                 "allowed_hosts": [host],
-                "allowed_cidrs": [],
+                "allowed_cidrs": allowed_cidrs or [],
                 "allowed_paths": [f"glob:{allowed_path}"],
                 "mutation_grants": [
                     {
@@ -55,7 +61,8 @@ def _scope(path: Path, *, host: str = "llm.example.test", allowed_path: str) -> 
         ),
         encoding="utf-8",
     )
-    return ScopeGuard.from_file(path, now=NOW)
+    resolver = (lambda _host: ["192.0.2.10"]) if allowed_cidrs else None
+    return ScopeGuard.from_file(path, resolver=resolver, now=NOW)
 
 
 def _candidate() -> PlanningCandidate:
@@ -73,7 +80,7 @@ def _candidate() -> PlanningCandidate:
 def _config(
     *,
     kind: str = "openai_compatible",
-    base_url: str = "https://llm.example.test/v1",
+    base_url: str = "https://llm.example.test",
     api_key: SecretHandle | None = None,
 ) -> AIProviderConfig:
     values: dict[str, Any] = {
@@ -100,7 +107,7 @@ def test_openai_compatible_client_checks_provider_scope_and_never_sends_raw_valu
     secret = registry.store_secret(purpose="provider_api_key", value=API_KEY)
     config = AIProviderConfig(
         kind="openai_compatible",
-        base_url="https://llm.example.test/v1",
+        base_url="https://llm.example.test",
         model="test-model",
         api_key=secret,
         safe_headers={"X-Client": "openbola-test"},
@@ -178,10 +185,29 @@ def test_unsafe_safe_headers_are_rejected() -> None:
         _config_with_headers({"X-Extra": "line\nfeed"})
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["Host", ":authority", "Connection", "Content-Length", "Transfer-Encoding", "Forwarded"],
+)
+def test_forbidden_static_headers_are_rejected_by_client(tmp_path: Path, name: str) -> None:
+    registry = InMemorySessionValueRegistry()
+    secret = registry.store_secret(purpose="provider_api_key", value=API_KEY)
+    guard = _scope(tmp_path / "provider.yaml", allowed_path="/v1/chat/completions")
+    client = OpenAICompatibleClient(
+        _config(api_key=secret),
+        secrets=registry,
+        provider_scope_guard=guard,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+    )
+    object.__setattr__(client._config, "safe_headers", {name: "value"})
+    with pytest.raises(ProviderRequestError):
+        client.propose_tests(build_sanitized_context((_candidate(),)))
+
+
 def _config_with_headers(headers: dict[str, str]) -> AIProviderConfig:
     return AIProviderConfig(
         kind="openai_compatible",
-        base_url="https://llm.example.test/v1",
+        base_url="https://llm.example.test",
         model="test-model",
         api_key=SecretHandle(id="provider-secret", purpose="provider_api_key"),
         safe_headers=headers,
@@ -266,6 +292,69 @@ def test_invalid_or_oversize_provider_responses_are_generic(
     assert "secret provider body" not in str(error.value)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"choices": [], "choices": []}',
+        b'{"choices": NaN}',
+    ],
+)
+def test_outer_provider_envelope_rejects_duplicate_or_nonfinite_json(
+    tmp_path: Path, body: bytes
+) -> None:
+    registry = InMemorySessionValueRegistry()
+    secret = registry.store_secret(purpose="provider_api_key", value=API_KEY)
+    guard = _scope(tmp_path / "provider.yaml", allowed_path="/v1/chat/completions")
+    client = OpenAICompatibleClient(
+        _config(api_key=secret),
+        secrets=registry,
+        provider_scope_guard=guard,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body)),
+    )
+    with pytest.raises(ProviderResponseError):
+        client.propose_tests(build_sanitized_context((_candidate(),)))
+
+
+def test_non_ascii_provider_secret_is_rejected_before_transport(tmp_path: Path) -> None:
+    called = False
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200)
+
+    registry = InMemorySessionValueRegistry()
+    secret = registry.store_secret(purpose="provider_api_key", value="clé")
+    guard = _scope(tmp_path / "provider.yaml", allowed_path="/v1/chat/completions")
+    client = OpenAICompatibleClient(
+        _config(api_key=secret),
+        secrets=registry,
+        provider_scope_guard=guard,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(ProviderCredentialError):
+        client.propose_tests(build_sanitized_context((_candidate(),)))
+    assert not called
+
+
+def test_provider_scope_peer_set_requires_pinned_transport(tmp_path: Path) -> None:
+    registry = InMemorySessionValueRegistry()
+    secret = registry.store_secret(purpose="provider_api_key", value=API_KEY)
+    guard = _scope(
+        tmp_path / "provider.yaml",
+        allowed_path="/v1/chat/completions",
+        allowed_cidrs=["192.0.2.0/24"],
+    )
+    client = OpenAICompatibleClient(
+        _config(api_key=secret),
+        secrets=registry,
+        provider_scope_guard=guard,
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200)),
+    )
+    with pytest.raises(ProviderRequestError, match="pinned transport"):
+        client.propose_tests(build_sanitized_context((_candidate(),)))
+
+
 def test_redirect_target_is_checked_once_and_never_followed(tmp_path: Path) -> None:
     seen: list[httpx.Request] = []
 
@@ -273,8 +362,9 @@ def test_redirect_target_is_checked_once_and_never_followed(tmp_path: Path) -> N
         seen.append(request)
         return httpx.Response(302, headers={"Location": "/v1/chat/completions/final"})
 
-    class GuardSpy:
+    class GuardSpy(ScopeGuard):
         def __init__(self, delegate: ScopeGuard) -> None:
+            super().__init__(delegate.config, now=NOW)
             self.delegate = delegate
             self.urls: list[str] = []
 
@@ -292,7 +382,7 @@ def test_redirect_target_is_checked_once_and_never_followed(tmp_path: Path) -> N
     client = OpenAICompatibleClient(
         _config(api_key=secret),
         secrets=registry,
-        provider_scope_guard=spy,  # type: ignore[arg-type]
+        provider_scope_guard=spy,
         transport=httpx.MockTransport(handler),
     )
 

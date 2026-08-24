@@ -34,6 +34,36 @@ uv run pytest tests/test_ai_clients.py tests/test_ai.py -q
 82 passed
 ```
 
+## Review hardening
+
+The client boundary was hardened after review:
+
+- provider guards must be real, provenance-backed `ScopeGuard` instances;
+  decisions must be HTTPS `ScopeDecision` values and non-empty approved peer
+  sets are rejected unless a pinned transport is available;
+- static headers use an explicit allowlist and reject authority, host,
+  hop-by-hop, proxy-forwarded, and framing headers;
+- response envelopes use duplicate-key/non-finite rejection and streaming
+  response-size caps before buffering;
+- non-ASCII, whitespace, and control-character provider secrets are rejected;
+- provider base URLs are HTTPS origins without a path; OpenAI-compatible calls
+  use the conventional `/v1/chat/completions` path.
+
+Additional verification:
+
+```text
+uv run ruff check src/openbola/ai.py src/openbola/ai_clients.py tests/test_ai.py tests/test_ai_clients.py
+All checks passed!
+
+uv run mypy src/openbola/ai.py src/openbola/ai_clients.py
+Success: no issues found in 2 source files
+
+uv run pytest tests/test_ai_clients.py tests/test_ai.py -q
+92 passed
+```
+
 ## Commit
 
-Pending commit: `feat: add scope-guarded BYOK AI clients`.
+The implementation and review hardening are committed in the current task
+commits, with the hardening follow-up recorded after the base
+`d4f0d7f feat: add scope-guarded BYOK AI clients` commit.

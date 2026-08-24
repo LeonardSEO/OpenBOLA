@@ -130,6 +130,7 @@ def _validate_base_url(value: object) -> str:
         or hostname is None
         or parsed.username is not None
         or parsed.password is not None
+        or parsed.path not in {"", "/"}
         or parsed.query
         or parsed.fragment
     ):

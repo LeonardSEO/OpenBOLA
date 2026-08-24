@@ -78,7 +78,7 @@ def test_typed_contracts_are_frozen_dataclasses_and_context_is_private() -> None
     contracts = (
         AIProviderConfig(
             kind="openai_compatible",
-            base_url="https://llm.example.test/v1",
+            base_url="https://llm.example.test",
             model="test-model",
             api_key=SecretHandle(id="secret-handle", purpose="provider_api_key"),
         ),
@@ -156,6 +156,13 @@ def test_proposed_contract_bounds_and_provider_url_validation() -> None:
         AIProviderConfig(
             kind="openai_compatible",
             base_url="http://llm.example.test",
+            model="model",
+            api_key=SecretHandle(id="secret", purpose="api_key"),
+        )
+    with pytest.raises(ValueError):
+        AIProviderConfig(
+            kind="openai_compatible",
+            base_url="https://llm.example.test/v1",
             model="model",
             api_key=SecretHandle(id="secret", purpose="api_key"),
         )
