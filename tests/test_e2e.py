@@ -118,7 +118,15 @@ def test_local_mock_e2e_finds_bola_and_protected_without_secret_material(
         Verdict.BOLA,
         Verdict.PROTECTED,
     }
-    assert len(result.report_paths) == 4
+    assert set(result.report_paths) == {"json", "markdown", "csv", "html", "junit", "sarif"}
+    assert {path.name for path in result.report_paths.values()} == {
+        "report.json",
+        "report.md",
+        "report.csv",
+        "report.html",
+        "junit.xml",
+        "report.sarif",
+    }
     assert all(path.is_file() for path in result.report_paths.values())
     assert result.report_paths["json"].parent.is_dir()
 

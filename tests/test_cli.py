@@ -95,6 +95,15 @@ def test_cli_json_mode_is_machine_safe_and_requires_explicit_credentials(tmp_pat
     assert document["outcomes"]["protected"] == 0
     assert document["skipped_candidates"] == 1
     assert document["skip_reasons"]["no_strong_ownership_evidence"] == 1
+    assert set(document["reports"]) == {"json", "markdown", "csv", "html", "junit", "sarif"}
+    assert {Path(path).name for path in document["reports"].values()} == {
+        "report.json",
+        "report.md",
+        "report.csv",
+        "report.html",
+        "junit.xml",
+        "report.sarif",
+    }
     assert "CLI_SECRET" not in result.stdout
 
 

@@ -458,6 +458,14 @@ def test_write_reports_publishes_complete_new_bundle_and_never_follows_symlinks(
     secret = "REPORT_SECRET_SENTINEL"  # noqa: S105 - test sentinel
 
     assert set(paths) == {"json", "markdown", "csv", "html", "junit", "sarif"}
+    assert {path.name for path in paths.values()} == {
+        "report.json",
+        "report.md",
+        "report.csv",
+        "report.html",
+        "junit.xml",
+        "report.sarif",
+    }
     assert all(path.is_file() for path in paths.values())
     assert all(secret.encode() not in path.read_bytes() for path in paths.values())
 
@@ -505,6 +513,30 @@ def test_write_failure_cleans_stage_and_never_publishes_partial_bundle(
 
     assert not destination.exists()
     assert not list(tmp_path.glob(".reports.stage-*"))
+
+
+def test_failed_sixth_write_leaves_no_partial_report_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _bundle()
+    destination = tmp_path / "run"
+    original_write = reporting._write_staged_file
+    calls = 0
+
+    def fail_on_sixth(directory_fd: int, filename: str, payload: bytes) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 6:
+            raise OSError("injected report write failure")
+        original_write(directory_fd, filename, payload)
+
+    monkeypatch.setattr(reporting, "_write_staged_file", fail_on_sixth)
+    with pytest.raises(OSError, match="injected report write failure"):
+        write_reports(bundle, output_dir=destination)
+
+    assert calls == 6
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".run.stage-*"))
 
 
 def test_native_publish_does_not_replace_destination_created_during_race(
