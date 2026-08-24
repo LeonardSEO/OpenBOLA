@@ -19,7 +19,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
-from typing import Any, Literal, NoReturn, Protocol, TypeVar, cast
+from typing import Any, Literal, NoReturn, Protocol, SupportsIndex, TypeVar, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from openbola.discovery import FieldInventory, ProviderConfidence, ResourceInventory
@@ -188,6 +188,13 @@ class AdapterRecordView:
     response_body: bytes | None = field(default=None, repr=False)
 
     def __reduce__(self) -> NoReturn:
+        raise TypeError("Adapter record view serialization is disabled.")
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> NoReturn:
+        del protocol
+        raise TypeError("Adapter record view serialization is disabled.")
+
+    def __getstate__(self) -> NoReturn:
         raise TypeError("Adapter record view serialization is disabled.")
 
 
