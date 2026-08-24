@@ -162,3 +162,7 @@ boundaries. External P11 publication actions remain separately approval-gated.
   association, opaque record handles, and sensitive/operator/parent guards.
   Implementer reports targeted 9 and full Hasura 17 tests green; independent
   review is pending.
+- P4d Task 3 independently approved: variable/root association, direct-ID and
+  parent `_eq` handling, sensitive/range/pattern exclusions, opaque handle
+  conversion, and origin isolation all pass review. Task 4 acceptance proof is
+  next.
