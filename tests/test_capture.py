@@ -1474,6 +1474,29 @@ def test_in_session_capture_adapter_bridge_rejects_unsafe_results(tmp_path: Path
         observed_methods=frozenset({"GET"}),
     )
 
+    class InventorySubclass(ResourceInventory):
+        pass
+
+    subclass_inventory = InventorySubclass(
+        provider=safe_inventory.provider,
+        provider_confidence=safe_inventory.provider_confidence,
+        resource_name=safe_inventory.resource_name,
+        endpoint_template=safe_inventory.endpoint_template,
+        fields=safe_inventory.fields,
+        record_handles=safe_inventory.record_handles,
+        observed_methods=safe_inventory.observed_methods,
+    )
+    injected_state_inventory = ResourceInventory(
+        provider=safe_inventory.provider,
+        provider_confidence=safe_inventory.provider_confidence,
+        resource_name=safe_inventory.resource_name,
+        endpoint_template=safe_inventory.endpoint_template,
+        fields=safe_inventory.fields,
+        record_handles=safe_inventory.record_handles,
+        observed_methods=safe_inventory.observed_methods,
+    )
+    object.__setattr__(injected_state_inventory, "unexpected_state", object())
+
     assert capture.with_adapter_records(lambda _records: (safe_inventory,)) == (safe_inventory,)
     for result in (
         raw_record,
@@ -1481,6 +1504,8 @@ def test_in_session_capture_adapter_bridge_rejects_unsafe_results(tmp_path: Path
         {"record": raw_record},
         (raw_record,),
         (unsafe_inventory,),
+        (subclass_inventory,),
+        (injected_state_inventory,),
     ):
         with pytest.raises(CaptureError, match="ResourceInventory tuple"):
             capture.with_adapter_records(lambda _records, result=result: result)
