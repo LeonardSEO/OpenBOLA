@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import openbola.reporting as reporting
+from openbola.capture import InSessionCapture
 from openbola.models import (
     CredentialKind,
     CredentialRef,
@@ -89,6 +90,15 @@ def _bundle(
         authorization_reference="ENG-1234-approved-scope",
         total_combinations=4,
     )
+
+
+def test_reports_reject_session_material_and_emit_no_full_value_sentinel(
+    tmp_path: Path, captured_session_with_sentinels: InSessionCapture
+) -> None:
+    with pytest.raises(ValueError, match="allowlist"):
+        serialize_evidence({"capture_exchange": captured_session_with_sentinels.exchanges[0]})
+    paths = write_reports(_bundle(), output_dir=tmp_path / "reports")
+    assert all(b"FULL_VALUE_SENTINEL" not in path.read_bytes() for path in paths.values())
 
 
 def test_all_formats_are_parseable_deterministic_and_share_safe_summary() -> None:

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from openbola.capture import InSessionCapture
 from openbola.models import (
     AuditEventType,
     CredentialKind,
@@ -43,6 +44,26 @@ def _credential(identity: str) -> CredentialRef:
         name="Authorization",
         secret_ref=f"keyring:bola/{identity}",
     )
+
+
+def test_state_rejects_session_capture_and_persists_no_full_value_sentinel(
+    tmp_path: Path, captured_session_with_sentinels: InSessionCapture
+) -> None:
+    store = StateStore(tmp_path / "state.db")
+    with pytest.raises(ValueError):
+        store.add_audit_event(
+            AuditEventType.RUN_STARTED,
+            {"capture_exchange": captured_session_with_sentinels.exchanges[0]},
+        )
+    db_path = tmp_path / "state.db"
+    artifact_bytes = b"".join(
+        candidate.read_bytes()
+        for candidate in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm"))
+        if candidate.exists()
+    )
+    assert b"FULL_VALUE_SENTINEL" not in artifact_bytes
+    assert b"RAW_ID_4eC39HqLyjWDarjtT1zdp7dc" not in artifact_bytes
+    assert b"REQUEST_SECRET_SENTINEL" not in artifact_bytes
 
 
 def test_state_database_and_sidecars_are_private(tmp_path: Path) -> None:

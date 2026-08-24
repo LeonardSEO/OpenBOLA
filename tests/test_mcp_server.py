@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 import openbola.mcp_server as mcp_module
+from openbola.capture import InSessionCapture
 from openbola.mcp_server import MCPService, MCPServiceError, create_mcp_server
 from openbola.models import (
     CredentialKind,
@@ -85,6 +86,38 @@ def _ownership_records(path: Path) -> Path:
         encoding="utf-8",
     )
     return path
+
+
+def test_mcp_imports_only_sanitized_session_har(
+    tmp_path: Path, captured_session_with_sentinels: InSessionCapture
+) -> None:
+    service = MCPService()
+    scope_result = service.load_scope(
+        _write_scope(
+            tmp_path / "scope.yaml",
+            mutation_grants=[
+                {
+                    "methods": ["POST"],
+                    "path_patterns": ["glob:/v1/**"],
+                    "allowed_fields": ["id"],
+                    "record_scope": "explicit",
+                    "max_records": 1,
+                    "max_requests": 1,
+                    "allow_canary_create_delete": False,
+                }
+            ],
+        )
+    )
+    assert scope_result["ok"] is True
+    assert service.init_state(tmp_path / "state.db")["ok"] is True
+    result = service.import_har(captured_session_with_sentinels.har_path, "alice")
+    assert result["ok"] is True
+    assert all(
+        "FULL_VALUE_SENTINEL" not in repr(record)
+        and "RAW_ID_4eC39HqLyjWDarjtT1zdp7dc" not in repr(record)
+        and "REQUEST_SECRET_SENTINEL" not in repr(record)
+        for record in service.session.records
+    )
 
 
 def test_module_does_not_require_fastmcp() -> None:

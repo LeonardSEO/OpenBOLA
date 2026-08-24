@@ -20,6 +20,9 @@ from openbola.ai import (
     sanitize_context,
     validate_plan_for_context,
 )
+from openbola.capture import InSessionCapture
+from openbola.discovery import GenericAdapter
+from openbola.handles import InMemorySessionValueRegistry
 
 
 def _context() -> dict[str, Any]:
@@ -118,6 +121,26 @@ def test_sanitize_context_uses_allowlist_and_drops_secrets_and_raw_urls() -> Non
             "locator": "query:document_id",
         }
     ]
+
+
+def test_ai_context_from_session_adapter_has_no_full_value_sentinel(
+    captured_session_with_sentinels: InSessionCapture,
+) -> None:
+    registry = InMemorySessionValueRegistry()
+    inventories = captured_session_with_sentinels.with_adapter_records(
+        GenericAdapter(registry).inventory
+    )
+    context = {
+        "endpoint_patterns": [
+            {
+                "endpoint_template": item.endpoint_template,
+                "allowed_methods": sorted(item.observed_methods),
+            }
+            for item in inventories
+        ],
+        "candidates": [],
+    }
+    assert b"FULL_VALUE_SENTINEL" not in json.dumps(sanitize_context(context)).encode()
 
 
 def test_plan_validation_rejects_hallucinated_endpoint() -> None:
