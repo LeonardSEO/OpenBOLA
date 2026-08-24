@@ -14,6 +14,7 @@ import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -59,6 +60,20 @@ _SCOPE_KEYS = frozenset(
         "mutation_grants",
     }
 )
+_MUTATION_GRANT_KEYS = frozenset(
+    {
+        "methods",
+        "path_patterns",
+        "allowed_fields",
+        "record_scope",
+        "max_records",
+        "max_requests",
+        "allow_canary_create_delete",
+    }
+)
+# Mirrors ExecutorLimits.max_requests's existing 1..100_000 bound in executor.py.
+# Duplicated deliberately: scope.py does not import executor.py.
+_MUTATION_REQUEST_HARD_CAP = 100_000
 
 
 class _ScopeLoader(yaml.SafeLoader):
@@ -98,12 +113,22 @@ class PathRule:
         return self.compiled_regex.fullmatch(path) is not None
 
 
+class MutationRecordScope(StrEnum):
+    EXPLICIT = "explicit"
+    ALL_DISCOVERED = "all_discovered"
+
+
 @dataclass(frozen=True)
 class MutationGrant:
     """An explicit authorization for mutation methods on the listed paths."""
 
     methods: frozenset[str]
     path_rules: tuple[PathRule, ...]
+    allowed_fields: frozenset[str]
+    record_scope: MutationRecordScope
+    max_records: int
+    max_requests: int
+    allow_canary_create_delete: bool
 
     def permits(self, method: str, path: str) -> bool:
         return method in self.methods and any(rule.matches(path) for rule in self.path_rules)
@@ -618,13 +643,28 @@ def _mutation_grants(document: Mapping[object, object]) -> tuple[MutationGrant, 
         raise ScopeError("mutation_grants must be a list.")
     grants: list[MutationGrant] = []
     for raw_grant in raw_grants:
-        if not isinstance(raw_grant, Mapping) or set(raw_grant) != {"methods", "path_patterns"}:
-            raise ScopeError("Each mutation grant must contain exactly methods and path_patterns.")
+        if not isinstance(raw_grant, Mapping) or set(raw_grant) != _MUTATION_GRANT_KEYS:
+            raise ScopeError(
+                "Each mutation grant must contain exactly methods, path_patterns, "
+                "allowed_fields, record_scope, max_records, max_requests, and "
+                "allow_canary_create_delete."
+            )
         methods = frozenset(_methods(raw_grant.get("methods"), "mutation grant methods"))
         grants.append(
             MutationGrant(
                 methods=methods,
                 path_rules=_path_rules(raw_grant, "path_patterns"),
+                allowed_fields=_allowed_fields(raw_grant),
+                record_scope=_mutation_grant_record_scope(raw_grant),
+                max_records=_mutation_grant_positive_int(
+                    raw_grant, "max_records", max_value=_MUTATION_REQUEST_HARD_CAP
+                ),
+                max_requests=_mutation_grant_positive_int(
+                    raw_grant, "max_requests", max_value=_MUTATION_REQUEST_HARD_CAP
+                ),
+                allow_canary_create_delete=_mutation_grant_bool(
+                    raw_grant, "allow_canary_create_delete"
+                ),
             )
         )
     return _normalise_mutation_grants(tuple(grants))
@@ -644,13 +684,90 @@ def _normalise_mutation_grants(value: object) -> tuple[MutationGrant, ...]:
             raise ScopeError("Mutation grants must contain exact uppercase HTTP methods.")
         if not grant.methods.issubset(_MUTATION_METHODS):
             raise ScopeError("Mutation grants may contain only POST, PUT, PATCH, and DELETE.")
+        if (
+            not isinstance(grant.allowed_fields, frozenset)
+            or not grant.allowed_fields
+            or not all(
+                isinstance(name, str) and name and name == name.strip()
+                for name in grant.allowed_fields
+            )
+        ):
+            raise ScopeError(
+                "allowed_fields must be a non-empty frozenset of non-empty field names."
+            )
+        if not isinstance(grant.record_scope, MutationRecordScope):
+            raise ScopeError("record_scope must be a MutationRecordScope value.")
+        if (
+            isinstance(grant.max_records, bool)
+            or not isinstance(grant.max_records, int)
+            or not 1 <= grant.max_records <= _MUTATION_REQUEST_HARD_CAP
+        ):
+            raise ScopeError(
+                f"max_records must be an integer between 1 and {_MUTATION_REQUEST_HARD_CAP}."
+            )
+        if (
+            isinstance(grant.max_requests, bool)
+            or not isinstance(grant.max_requests, int)
+            or not 1 <= grant.max_requests <= _MUTATION_REQUEST_HARD_CAP
+        ):
+            raise ScopeError(
+                f"max_requests must be an integer between 1 and {_MUTATION_REQUEST_HARD_CAP}."
+            )
+        if grant.max_records > grant.max_requests:
+            raise ScopeError("max_records must not exceed max_requests.")
+        if type(grant.allow_canary_create_delete) is not bool:
+            raise ScopeError(
+                "allow_canary_create_delete must be the exact YAML boolean true or false."
+            )
         grants.append(
             MutationGrant(
                 methods=grant.methods,
                 path_rules=_normalise_path_rules(grant.path_rules, "mutation grant path_patterns"),
+                allowed_fields=frozenset(grant.allowed_fields),
+                record_scope=grant.record_scope,
+                max_records=grant.max_records,
+                max_requests=grant.max_requests,
+                allow_canary_create_delete=grant.allow_canary_create_delete,
             )
         )
     return tuple(grants)
+
+
+def _allowed_fields(raw_grant: Mapping[object, object]) -> frozenset[str]:
+    values = _string_list(raw_grant, "allowed_fields", required=True)
+    if len(set(values)) != len(values):
+        raise ScopeError("allowed_fields must not contain duplicate field names.")
+    return frozenset(values)
+
+
+def _mutation_grant_record_scope(raw_grant: Mapping[object, object]) -> MutationRecordScope:
+    value = raw_grant.get("record_scope")
+    if not isinstance(value, str):
+        raise ScopeError("record_scope must be a string.")
+    try:
+        return MutationRecordScope(value)
+    except ValueError as error:
+        allowed = ", ".join(member.value for member in MutationRecordScope)
+        raise ScopeError(f"record_scope must be one of: {allowed}.") from error
+
+
+def _mutation_grant_positive_int(
+    raw_grant: Mapping[object, object],
+    field_name: str,
+    *,
+    max_value: int,
+) -> int:
+    value = raw_grant.get(field_name)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= max_value:
+        raise ScopeError(f"{field_name} must be an integer between 1 and {max_value}.")
+    return value
+
+
+def _mutation_grant_bool(raw_grant: Mapping[object, object], field_name: str) -> bool:
+    value = raw_grant.get(field_name)
+    if type(value) is not bool:
+        raise ScopeError(f"{field_name} must be the exact YAML boolean true or false.")
+    return value
 
 
 def _methods(value: object, field: str) -> list[str]:

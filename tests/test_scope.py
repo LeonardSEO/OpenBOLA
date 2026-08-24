@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from openbola.scope import (
+    MutationRecordScope,
     ScopeConfig,
     ScopeDecision,
     ScopeError,
@@ -228,6 +229,11 @@ def test_read_methods_and_mutation_grants_are_separate(tmp_path: Path) -> None:
             {
                 "methods": ["POST"],
                 "path_patterns": ["glob:/v1/reports"],
+                "allowed_fields": ["title"],
+                "record_scope": "explicit",
+                "max_records": 10,
+                "max_requests": 20,
+                "allow_canary_create_delete": True,
             }
         ],
     )
@@ -239,6 +245,13 @@ def test_read_methods_and_mutation_grants_are_separate(tmp_path: Path) -> None:
         guard.require_allowed("https://api.example.test/v1/items", "POST", now=NOW)
     with pytest.raises(ScopeError, match="exact uppercase"):
         guard.require_allowed("https://api.example.test/v1/items", "get", now=NOW)
+
+    grant = guard.config.mutation_grants[0]
+    assert grant.allowed_fields == frozenset({"title"})
+    assert grant.record_scope is MutationRecordScope.EXPLICIT
+    assert grant.max_records == 10
+    assert grant.max_requests == 20
+    assert grant.allow_canary_create_delete is True
 
 
 def test_userinfo_url_is_rejected_without_echoing_it(tmp_path: Path) -> None:
@@ -369,3 +382,137 @@ def test_ambiguous_yaml_constructs_are_rejected(
 
     with pytest.raises(ScopeError, match="unambiguous YAML"):
         load_scope(scope_file, now=NOW)
+
+
+def _mutation_grant(**overrides: Any) -> dict[str, Any]:
+    grant: dict[str, Any] = {
+        "methods": ["PATCH"],
+        "path_patterns": ["glob:/v1/users/*"],
+        "allowed_fields": ["email"],
+        "record_scope": "all_discovered",
+        "max_records": 100,
+        "max_requests": 200,
+        "allow_canary_create_delete": False,
+    }
+    grant.update(overrides)
+    return grant
+
+
+def test_mutation_grant_full_valid_grant_round_trips(tmp_path: Path) -> None:
+    scope_file = _write_scope(tmp_path / "scope.yaml", mutation_grants=[_mutation_grant()])
+    guard = ScopeGuard.from_file(scope_file, now=NOW)
+
+    grant = guard.config.mutation_grants[0]
+    assert grant.allowed_fields == frozenset({"email"})
+    assert grant.record_scope is MutationRecordScope.ALL_DISCOVERED
+    assert grant.max_records == 100
+    assert grant.max_requests == 200
+    assert grant.allow_canary_create_delete is False
+
+
+def test_mutation_grant_rejects_missing_key(tmp_path: Path) -> None:
+    grant = _mutation_grant()
+    del grant["allowed_fields"]
+    scope_file = _write_scope(tmp_path / "scope.yaml", mutation_grants=[grant])
+
+    with pytest.raises(ScopeError, match="must contain exactly"):
+        load_scope(scope_file, now=NOW)
+
+
+def test_mutation_grant_rejects_unknown_key(tmp_path: Path) -> None:
+    grant = _mutation_grant(unexpected_field="x")
+    scope_file = _write_scope(tmp_path / "scope.yaml", mutation_grants=[grant])
+
+    with pytest.raises(ScopeError, match="must contain exactly"):
+        load_scope(scope_file, now=NOW)
+
+
+def test_mutation_grant_rejects_empty_allowed_fields(tmp_path: Path) -> None:
+    scope_file = _write_scope(
+        tmp_path / "scope.yaml",
+        mutation_grants=[_mutation_grant(allowed_fields=[])],
+    )
+
+    with pytest.raises(ScopeError, match="allowed_fields"):
+        load_scope(scope_file, now=NOW)
+
+
+def test_mutation_grant_rejects_duplicate_allowed_fields(tmp_path: Path) -> None:
+    scope_file = _write_scope(
+        tmp_path / "scope.yaml",
+        mutation_grants=[_mutation_grant(allowed_fields=["email", "email"])],
+    )
+
+    with pytest.raises(ScopeError, match="duplicate"):
+        load_scope(scope_file, now=NOW)
+
+
+def test_mutation_grant_rejects_unknown_record_scope(tmp_path: Path) -> None:
+    scope_file = _write_scope(
+        tmp_path / "scope.yaml",
+        mutation_grants=[_mutation_grant(record_scope="every_record")],
+    )
+
+    with pytest.raises(ScopeError, match="record_scope"):
+        load_scope(scope_file, now=NOW)
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, 100_001, True])
+def test_mutation_grant_rejects_out_of_range_max_records(tmp_path: Path, bad_value: object) -> None:
+    scope_file = _write_scope(
+        tmp_path / "scope.yaml",
+        mutation_grants=[_mutation_grant(max_records=bad_value)],
+    )
+
+    with pytest.raises(ScopeError, match="max_records"):
+        load_scope(scope_file, now=NOW)
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, 100_001, True])
+def test_mutation_grant_rejects_out_of_range_max_requests(
+    tmp_path: Path, bad_value: object
+) -> None:
+    scope_file = _write_scope(
+        tmp_path / "scope.yaml",
+        mutation_grants=[_mutation_grant(max_requests=bad_value)],
+    )
+
+    with pytest.raises(ScopeError, match="max_requests"):
+        load_scope(scope_file, now=NOW)
+
+
+def test_mutation_grant_rejects_max_records_exceeding_max_requests(tmp_path: Path) -> None:
+    scope_file = _write_scope(
+        tmp_path / "scope.yaml",
+        mutation_grants=[_mutation_grant(max_records=50, max_requests=10)],
+    )
+
+    with pytest.raises(ScopeError, match="max_records must not exceed max_requests"):
+        load_scope(scope_file, now=NOW)
+
+
+@pytest.mark.parametrize("bad_value", ["true", 1, 0])
+def test_mutation_grant_rejects_non_boolean_allow_canary_create_delete(
+    tmp_path: Path,
+    bad_value: object,
+) -> None:
+    scope_file = _write_scope(
+        tmp_path / "scope.yaml",
+        mutation_grants=[_mutation_grant(allow_canary_create_delete=bad_value)],
+    )
+
+    with pytest.raises(ScopeError, match="allow_canary_create_delete"):
+        load_scope(scope_file, now=NOW)
+
+
+def test_mutation_grant_handmade_bypass_with_invalid_record_scope_is_rejected(
+    tmp_path: Path,
+) -> None:
+    config = load_scope(
+        _write_scope(tmp_path / "scope.yaml", mutation_grants=[_mutation_grant()]),
+        now=NOW,
+    )
+    tampered_grant = replace(config.mutation_grants[0], record_scope="nonsense")
+
+    with pytest.raises(ScopeError, match="record_scope"):
+        ScopeGuard(replace(config, mutation_grants=(tampered_grant,)), now=NOW)

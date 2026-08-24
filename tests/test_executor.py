@@ -39,7 +39,15 @@ def _scope_file(path: Path, *, mutation: bool = False, hostname: bool = False) -
     }
     if mutation:
         document["mutation_grants"] = [
-            {"methods": ["POST", "DELETE"], "path_patterns": ["glob:/v1/**"]}
+            {
+                "methods": ["POST", "DELETE"],
+                "path_patterns": ["glob:/v1/**"],
+                "allowed_fields": ["status"],
+                "record_scope": "explicit",
+                "max_records": 100,
+                "max_requests": 1000,
+                "allow_canary_create_delete": True,
+            }
         ]
     path.write_text(yaml.safe_dump(document), encoding="utf-8")
     return path

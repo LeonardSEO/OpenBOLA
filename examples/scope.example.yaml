@@ -42,6 +42,12 @@ mutation_grants:
       - "POST"
     path_patterns:
       - "glob:/v1/reports"
+    allowed_fields:
+      - "status"
+    record_scope: "explicit"
+    max_records: 500
+    max_requests: 5000
+    allow_canary_create_delete: false
 
 # The executor must submit the exact ScopeDecision.canonical_url, and, when a
 # decision has connect_ips, pin its connection to one of those addresses and
