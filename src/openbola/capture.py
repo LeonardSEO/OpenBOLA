@@ -33,6 +33,13 @@ _MAX_CAPTURE_ENTRIES = 10_000
 _MAX_FULL_BODY_BYTES = 1024 * 1024
 _MAX_FULL_STATE_BYTES = 1024 * 1024
 _MAX_FULL_SESSION_BYTES = 25 * 1024 * 1024
+_SAFE_FULL_CAPTURE_ERRORS = frozenset(
+    {
+        "full capture body exceeds the safe limit",
+        "full capture event stream is incomplete",
+        "full capture session material exceeds the safe limit",
+    }
+)
 _MAX_URL_CHARS = 16_384
 _MAX_QUERY_FIELDS = 256
 _MAX_HEADER_COUNT = 256
@@ -546,8 +553,13 @@ class _FullFidelityEventCollector:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
+            safe_error = (
+                exc
+                if isinstance(exc, CaptureError) and str(exc) in _SAFE_FULL_CAPTURE_ERRORS
+                else CaptureError("full capture event stream is incomplete")
+            )
             with self._lock:
-                self._task_errors.append(exc)
+                self._task_errors.append(safe_error)
 
     @staticmethod
     def _request_body(request: Any) -> bytes | None:

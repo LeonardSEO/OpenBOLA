@@ -1016,6 +1016,7 @@ def _full_session_harness(
     *,
     response_body: bytes = b'{"id":"RAW_ID_4eC39HqLyjWDarjtT1zdp7dc","name":"FULL_VALUE_SENTINEL"}',
     response_body_delay: bool = False,
+    response_body_error: BaseException | None = None,
     exchange_count: int = 1,
     off_scope_request: bool = False,
 ) -> tuple[Any, Any]:
@@ -1072,6 +1073,8 @@ def _full_session_harness(
             self.headers = {"Content-Type": "application/json"}
 
         async def body(self) -> bytes:
+            if response_body_error is not None:
+                raise response_body_error
             if response_body_delay:
                 await asyncio.sleep(0)
             return response_body
@@ -1191,6 +1194,22 @@ def test_capture_session_awaits_response_body_before_returning(
     )
     session = asyncio.run(capture.capture_session(config, Guard(), registry=registry))
     assert session.response_material(session.exchanges[0]).body == b"FULL_VALUE_SENTINEL"
+
+
+def test_capture_session_sanitizes_response_body_exceptions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbola import capture
+
+    registry, config = _full_session_harness(
+        tmp_path,
+        monkeypatch,
+        response_body_error=RuntimeError("RAW_VALUE_SENTINEL"),
+    )
+    with pytest.raises(CaptureError, match="event stream is incomplete") as excinfo:
+        asyncio.run(capture.capture_session(config, Guard(), registry=registry))
+    assert "RAW_VALUE_SENTINEL" not in str(excinfo.value)
+    assert not (config.capture_root / config.output_path).exists()
 
 
 @pytest.mark.parametrize(
