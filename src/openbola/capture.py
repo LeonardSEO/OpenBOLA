@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import importlib
 import json
 import os
 import re
 import secrets
 import stat
+import struct
+import time
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -702,6 +707,33 @@ def _sanitize_body(value: bytes | str | None, headers: Mapping[str, str]) -> byt
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, _StructuralLimitExceeded):
         return _REDACTED.encode()
     return json.dumps(redacted, separators=(",", ":")).encode()
+
+
+_TOTP_PERIOD_SECONDS = 30
+_TOTP_DIGITS = 6
+
+
+def _totp_code(
+    secret_base32: str,
+    *,
+    now: float | None = None,
+    period: int = _TOTP_PERIOD_SECONDS,
+    digits: int = _TOTP_DIGITS,
+) -> str:
+    """Compute the current RFC 6238 TOTP code for a base32-encoded seed."""
+    padded = secret_base32.strip().upper().replace(" ", "")
+    padded += "=" * (-len(padded) % 8)
+    try:
+        key = base64.b32decode(padded)
+    except ValueError as exc:
+        raise CaptureError("TOTP secret must be valid base32") from exc
+    counter = int((now if now is not None else time.time()) // period)
+    counter_bytes = struct.pack(">Q", counter)
+    digest = hmac.new(key, counter_bytes, hashlib.sha1).digest()  # noqa: S324 - RFC 6238 HMAC-SHA1, not a security digest
+    offset = digest[-1] & 0x0F
+    truncated = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
+    code = truncated % (10**digits)
+    return str(code).zfill(digits)
 
 
 def _redact_json(value: Any) -> Any:

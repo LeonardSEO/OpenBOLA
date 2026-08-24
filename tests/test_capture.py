@@ -874,3 +874,42 @@ def test_login_recipe_accepts_extra_totp_field() -> None:
         ),
     )
     assert recipe.extra_secret_fields[0].kind == "totp"
+
+
+_TOTP_TEST_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"  # noqa: S105 - RFC 6238 reference vector, not a secret
+
+
+@pytest.mark.parametrize(
+    ("now", "expected"),
+    [
+        (59, "287082"),
+        (1111111109, "081804"),
+        (1234567890, "005924"),
+    ],
+)
+def test_totp_code_matches_known_vectors(now: int, expected: str) -> None:
+    from openbola.capture import _totp_code
+
+    assert _totp_code(_TOTP_TEST_SECRET, now=now) == expected
+
+
+def test_totp_code_is_six_digits_and_zero_padded() -> None:
+    from openbola.capture import _totp_code
+
+    code = _totp_code(_TOTP_TEST_SECRET, now=59)
+    assert len(code) == 6
+    assert code.isdigit()
+
+
+def test_totp_code_accepts_lowercase_and_unpadded_secret() -> None:
+    from openbola.capture import _totp_code
+
+    lowercase = _TOTP_TEST_SECRET.lower().rstrip("=")
+    assert _totp_code(lowercase, now=59) == _totp_code(_TOTP_TEST_SECRET, now=59)
+
+
+def test_totp_code_rejects_invalid_base32_secret() -> None:
+    from openbola.capture import _totp_code
+
+    with pytest.raises(CaptureError, match="base32"):
+        _totp_code("not-valid-base32!!!", now=59)
