@@ -192,11 +192,17 @@ plans before it.
    verify-restore per record, `all_discovered` auto-expansion with no silent
    sampling, AES-GCM recovery journal keyed via the OS vault, startup
    recovery gate (spec §6, §8, acceptance criteria 6–7).
-7. **P7 — Typed findings & new export formats**. Replace generic
-   `Mapping[str, Any]` evidence with typed `FindingEvidence`/
-   `CapabilityProof` (spec §9); add `report.html` (self-contained, CSP-safe)
-   and `junit.xml`; align existing Markdown/CSV/JSON/SARIF to the new
-   filenames and `openbola-report-v1` schema id.
+7. **P7 — Typed findings & new export formats**. **Status: complete, merged to
+   main (2026-08-24).** The report boundary now uses immutable typed
+   `FindingEvidence`/`CapabilityProof` contracts with a legacy-safe adapter;
+   deterministic JSON, Markdown, CSV, HTML, JUnit, and SARIF renderers share
+   the `openbola-report-v1` schema and publish the six v1 filenames atomically.
+   The cross-phase sentinel proof covers session handles, state, canonical
+   documents, all artifacts, and serialization; local full field values remain
+   P8 TUI-only. Acceptance checks:
+   `uv run pytest tests/test_report_boundary.py tests/test_reporting.py
+   tests/test_e2e.py tests/test_cli.py -v`, `uv run ruff check .`,
+   `uv run mypy src`, and `uv run pytest`.
 8. **P8 — Textual TUI shell**. Home/target/identity/capture/discovery/grant
    review/verification/findings/export/recovery screens (spec §7, §10)
    wired to the engine from P1–P7 through session services (config,
