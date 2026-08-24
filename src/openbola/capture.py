@@ -58,6 +58,7 @@ class CaptureConfig:
     headless: bool = True
     interactive_login: bool = False
     max_har_bytes: int = DEFAULT_MAX_HAR_BYTES
+    login_recipe: LoginRecipe | None = None
 
     def __post_init__(self) -> None:
         _validate_target_url(self.target_url)
@@ -68,6 +69,8 @@ class CaptureConfig:
             raise CaptureError("interactive_login requires headless=False")
         if self.max_har_bytes <= 0:
             raise CaptureError("max_har_bytes must be greater than zero")
+        if self.login_recipe is not None and self.interactive_login:
+            raise CaptureError("login_recipe and interactive_login are mutually exclusive")
 
 
 _LOGIN_SECRET_FIELD_KINDS = frozenset({"static", "totp"})
@@ -183,7 +186,11 @@ class InMemoryEventCollector:
 
 
 async def capture_har(
-    config: CaptureConfig, scope_guard: ScopeGuard, *, collector: CaptureCollector | None = None
+    config: CaptureConfig,
+    scope_guard: ScopeGuard,
+    *,
+    collector: CaptureCollector | None = None,
+    registry: Any | None = None,
 ) -> Path:
     """Write a sanitized HAR after a session without navigating the target URL."""
     try:
@@ -194,6 +201,8 @@ async def capture_har(
 
     if not isinstance(scope_guard, ScopeGuard):
         raise CaptureError("scope_guard must be a ScopeGuard")
+    if config.login_recipe is not None and registry is None:
+        raise CaptureError("registry is required when config.login_recipe is set")
     active_collector = collector or InMemoryEventCollector()
     policy_failures: list[ScopeError] = []
     async with async_playwright() as playwright:
@@ -206,7 +215,17 @@ async def capture_har(
             try:
                 await context.route("**/*", _scoped_route(scope_guard, policy_failures))
                 active_collector.attach(context)
-                if config.interactive_login:
+                if config.login_recipe is not None:
+                    page = await context.new_page()
+                    try:
+                        await _perform_login(page, config.login_recipe, registry)
+                    except async_api.Error as exc:
+                        raise CaptureError(
+                            "automated login did not reach success_url_pattern"
+                        ) from exc
+                    finally:
+                        await page.close()
+                elif config.interactive_login:
                     page = await context.new_page()
                     await page.wait_for_event("close")
             finally:
@@ -734,6 +753,31 @@ def _totp_code(
     truncated = struct.unpack(">I", digest[offset : offset + 4])[0] & 0x7FFFFFFF
     code = truncated % (10**digits)
     return str(code).zfill(digits)
+
+
+_LOGIN_TIMEOUT_MS = 15_000
+
+
+async def _perform_login(page: Any, recipe: LoginRecipe, registry: Any) -> None:
+    """Fill and submit a login recipe; the caller translates failures to CaptureError."""
+    await page.goto(recipe.start_url, timeout=_LOGIN_TIMEOUT_MS)
+    await page.fill(
+        recipe.username_selector,
+        registry.resolve_secret(recipe.username_secret),
+        timeout=_LOGIN_TIMEOUT_MS,
+    )
+    await page.fill(
+        recipe.password_selector,
+        registry.resolve_secret(recipe.password_secret),
+        timeout=_LOGIN_TIMEOUT_MS,
+    )
+    for extra in recipe.extra_secret_fields:
+        value = registry.resolve_secret(extra.secret)
+        if extra.kind == "totp":
+            value = _totp_code(value)
+        await page.fill(extra.selector, value, timeout=_LOGIN_TIMEOUT_MS)
+    await page.click(recipe.submit_selector, timeout=_LOGIN_TIMEOUT_MS)
+    await page.wait_for_url(recipe.success_url_pattern, timeout=_LOGIN_TIMEOUT_MS)
 
 
 def _redact_json(value: Any) -> Any:

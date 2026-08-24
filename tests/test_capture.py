@@ -913,3 +913,229 @@ def test_totp_code_rejects_invalid_base32_secret() -> None:
 
     with pytest.raises(CaptureError, match="base32"):
         _totp_code("not-valid-base32!!!", now=59)
+
+
+def _login_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_at: str | None = None,
+) -> tuple[list[tuple[str, tuple[Any, ...]]], type]:
+    from openbola import capture
+
+    calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    class FakePlaywrightError(Exception):
+        pass
+
+    class Page:
+        async def goto(self, url: str, **kwargs: object) -> None:
+            calls.append(("goto", (url,)))
+            if fail_at == "goto":
+                raise FakePlaywrightError("goto failed")
+
+        async def fill(self, selector: str, value: str, **kwargs: object) -> None:
+            calls.append(("fill", (selector, value)))
+            if fail_at == f"fill:{selector}":
+                raise FakePlaywrightError("fill failed")
+
+        async def click(self, selector: str, **kwargs: object) -> None:
+            calls.append(("click", (selector,)))
+            if fail_at == "click":
+                raise FakePlaywrightError("click failed")
+
+        async def wait_for_url(self, pattern: str, **kwargs: object) -> None:
+            calls.append(("wait_for_url", (pattern,)))
+            if fail_at == "wait_for_url":
+                raise FakePlaywrightError("timed out")
+
+        async def close(self) -> None:
+            calls.append(("close", ()))
+
+    class Context:
+        async def route(self, pattern: str, handler: object) -> None:
+            return None
+
+        async def new_page(self) -> Page:
+            return Page()
+
+        async def close(self) -> None:
+            return None
+
+    class Browser:
+        async def new_context(self, *, service_workers: str) -> Context:
+            return Context()
+
+        async def close(self) -> None:
+            return None
+
+    class Chromium:
+        async def launch(self, **kwargs: object) -> Browser:
+            return Browser()
+
+    class Manager:
+        async def __aenter__(self) -> object:
+            return SimpleNamespace(chromium=Chromium())
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class Collector:
+        def attach(self, context: object) -> None:
+            return None
+
+        async def entries(self) -> list[dict[str, object]]:
+            return []
+
+    monkeypatch.setattr(
+        capture.importlib,
+        "import_module",
+        lambda _: SimpleNamespace(
+            async_playwright=lambda: Manager(),
+            Error=FakePlaywrightError,
+        ),
+    )
+    return calls, Collector
+
+
+def _login_config(tmp_path: Path, recipe: Any) -> Any:
+    from openbola.capture import CaptureConfig
+
+    return CaptureConfig(
+        target_url="https://app.example.test/",
+        capture_root=tmp_path,
+        output_path=Path("out.har"),
+        identity="alice",
+        login_recipe=recipe,
+    )
+
+
+def test_capture_har_performs_automated_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbola.capture import LoginRecipe, LoginSecretField, capture_har
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    recipe = LoginRecipe(
+        name="staging-portal",
+        start_url="https://app.example.test/login",
+        username_selector="#email",
+        password_selector="#password",  # noqa: S106 - CSS selector, not a secret
+        submit_selector="#submit",
+        success_url_pattern="**/dashboard",
+        username_secret=registry.store_secret(purpose="username", value="alice"),
+        password_secret=registry.store_secret(purpose="password", value="hunter2"),
+        extra_secret_fields=(
+            LoginSecretField(
+                selector="#otp",
+                secret=registry.store_secret(
+                    purpose="totp_seed", value="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+                ),
+                kind="totp",
+            ),
+        ),
+    )
+    calls, Collector = _login_harness(monkeypatch)
+
+    output = asyncio.run(
+        capture_har(
+            _login_config(tmp_path, recipe),
+            Guard(),
+            collector=Collector(),
+            registry=registry,
+        )
+    )
+
+    assert output.exists()
+    kinds = [name for name, _ in calls]
+    assert kinds == ["goto", "fill", "fill", "fill", "click", "wait_for_url", "close"]
+    assert calls[0] == ("goto", ("https://app.example.test/login",))
+    assert calls[1] == ("fill", ("#email", "alice"))
+    assert calls[2] == ("fill", ("#password", "hunter2"))
+    assert calls[3][1][0] == "#otp"
+    assert calls[3][1][1] != "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"  # TOTP seed never filled verbatim
+    assert calls[3][1][1].isdigit() and len(calls[3][1][1]) == 6
+    assert calls[4] == ("click", ("#submit",))
+    assert calls[5] == ("wait_for_url", ("**/dashboard",))
+
+
+def test_capture_har_wraps_login_failure_as_capture_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbola.capture import LoginRecipe, capture_har
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    recipe = LoginRecipe(
+        name="staging-portal",
+        start_url="https://app.example.test/login",
+        username_selector="#email",
+        password_selector="#password",  # noqa: S106 - CSS selector, not a secret
+        submit_selector="#submit",
+        success_url_pattern="**/dashboard",
+        username_secret=registry.store_secret(purpose="username", value="alice"),
+        password_secret=registry.store_secret(purpose="password", value="hunter2"),
+    )
+    _, Collector = _login_harness(monkeypatch, fail_at="wait_for_url")
+
+    with pytest.raises(CaptureError, match="login"):
+        asyncio.run(
+            capture_har(
+                _login_config(tmp_path, recipe),
+                Guard(),
+                collector=Collector(),
+                registry=registry,
+            )
+        )
+
+
+def test_capture_config_rejects_login_recipe_with_interactive_login(tmp_path: Path) -> None:
+    from openbola.capture import CaptureConfig, LoginRecipe
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    recipe = LoginRecipe(
+        name="staging-portal",
+        start_url="https://app.example.test/login",
+        username_selector="#email",
+        password_selector="#password",  # noqa: S106 - CSS selector, not a secret
+        submit_selector="#submit",
+        success_url_pattern="**/dashboard",
+        username_secret=registry.store_secret(purpose="username", value="alice"),
+        password_secret=registry.store_secret(purpose="password", value="hunter2"),
+    )
+    with pytest.raises(CaptureError, match="mutually exclusive"):
+        CaptureConfig(
+            target_url="https://app.example.test/",
+            capture_root=tmp_path,
+            output_path=Path("out.har"),
+            identity="alice",
+            headless=False,
+            interactive_login=True,
+            login_recipe=recipe,
+        )
+
+
+def test_capture_har_requires_registry_when_login_recipe_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbola.capture import LoginRecipe, capture_har
+    from openbola.handles import InMemorySessionValueRegistry
+
+    registry = InMemorySessionValueRegistry()
+    recipe = LoginRecipe(
+        name="staging-portal",
+        start_url="https://app.example.test/login",
+        username_selector="#email",
+        password_selector="#password",  # noqa: S106 - CSS selector, not a secret
+        submit_selector="#submit",
+        success_url_pattern="**/dashboard",
+        username_secret=registry.store_secret(purpose="username", value="alice"),
+        password_secret=registry.store_secret(purpose="password", value="hunter2"),
+    )
+    _, Collector = _login_harness(monkeypatch)
+
+    with pytest.raises(CaptureError, match="registry"):
+        asyncio.run(
+            capture_har(_login_config(tmp_path, recipe), Guard(), collector=Collector())
+        )
