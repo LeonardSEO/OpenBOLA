@@ -25,5 +25,8 @@
 - `uv run ruff check src/openbola/reports.py tests/test_report_command.py` — passed.
 - `uv run mypy src/openbola/reports.py` — passed.
 
-The existing unrelated documentation, examples, and concurrent P9 service
-changes remain unstaged. No CLI integration or runtime dependency was added.
+The follow-up integration wires the service into the thin `report` CLI command,
+records a relative report-directory reference in append-only run metadata, and
+publishes the manifest from the pipeline after the six artifacts succeed. The
+existing unrelated documentation, examples, and concurrent P9 service changes
+remain unstaged. No runtime dependency was added.
