@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -186,6 +187,74 @@ def test_playwright_install_refuses_unscoped_distribution(monkeypatch: pytest.Mo
         setup_impl.PlaywrightInstaller().install()
 
     assert error.value.code == "scope_required"
+
+
+def test_playwright_readiness_awaits_connection_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "chromium"
+    executable.touch()
+    events: list[str] = []
+
+    class Manager:
+        async def __aenter__(self) -> object:
+            events.append("connection_started")
+            return SimpleNamespace(
+                chromium=SimpleNamespace(executable_path=str(executable)),
+            )
+
+        async def __aexit__(self, *_args: object) -> None:
+            events.append("connection_stopped")
+
+    monkeypatch.setattr(setup_impl, "_playwright_available", lambda: True)
+    monkeypatch.setattr(
+        setup_impl.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(async_playwright=Manager),
+    )
+
+    assert setup_impl.PlaywrightInstaller().is_ready() is True
+    assert events == ["connection_started", "connection_stopped"]
+
+
+def test_playwright_self_test_closes_browser_before_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Page:
+        url = "about:blank"
+
+        def goto(self, url: str, *, wait_until: str) -> None:
+            assert (url, wait_until) == ("about:blank", "load")
+
+    class Browser:
+        def new_page(self) -> Page:
+            return Page()
+
+        def close(self) -> None:
+            events.append("browser_closed")
+
+    class Manager:
+        def __enter__(self) -> object:
+            events.append("connection_started")
+            return SimpleNamespace(
+                chromium=SimpleNamespace(launch=lambda **_kwargs: Browser()),
+            )
+
+        def __exit__(self, *_args: object) -> None:
+            events.append("connection_stopped")
+
+    monkeypatch.setattr(setup_impl, "_playwright_available", lambda: True)
+    monkeypatch.setattr(
+        setup_impl.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(sync_playwright=Manager),
+    )
+
+    assert setup_impl.PlaywrightSelfTest().run() is True
+    assert events == ["connection_started", "browser_closed", "connection_stopped"]
 
 
 def test_default_installer_fails_closed_without_running_a_distribution_request(

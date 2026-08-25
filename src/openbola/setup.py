@@ -14,6 +14,7 @@ subprocess, network, or operating-system vault.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import importlib
 import importlib.util
@@ -284,10 +285,16 @@ class PlaywrightInstaller:
         if not _playwright_available():
             return False
         try:
-            sync_api = importlib.import_module("playwright.sync_api")
-            with sync_api.sync_playwright() as playwright:
-                executable = Path(playwright.chromium.executable_path)
-            return executable.is_file()
+            async_api = importlib.import_module("playwright.async_api")
+
+            async def executable_is_ready() -> bool:
+                async with async_api.async_playwright() as playwright:
+                    executable = Path(playwright.chromium.executable_path)
+                    return executable.is_file()
+
+            # The sync context can leave its initialization task pending when
+            # only a local property is read and no protocol round-trip occurs.
+            return asyncio.run(executable_is_ready())
         except (OSError, ImportError, RuntimeError, AttributeError, TypeError):
             return False
 
@@ -302,20 +309,22 @@ class PlaywrightSelfTest:
     def run(self) -> bool:
         if not _playwright_available():
             return False
-        browser: Any = None
         try:
             sync_api = importlib.import_module("playwright.sync_api")
             with sync_api.sync_playwright() as playwright:
                 browser = playwright.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.goto("about:blank", wait_until="load")
-                return cast(str, page.url) == "about:blank"
+                try:
+                    page = browser.new_page()
+                    page.goto("about:blank", wait_until="load")
+                    return cast(str, page.url) == "about:blank"
+                finally:
+                    # The browser must be closed while Playwright still owns
+                    # its connection. Closing it after leaving this context
+                    # strands the connection's cancellation task at shutdown.
+                    with suppress(Exception):
+                        browser.close()
         except (OSError, ImportError, RuntimeError, AttributeError, TypeError):
             return False
-        finally:
-            if browser is not None:
-                with suppress(Exception):
-                    browser.close()
 
 
 def _invoke_install(installer: BrowserInstaller, *, force: bool) -> None:
