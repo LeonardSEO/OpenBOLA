@@ -86,6 +86,12 @@ def test_readme_launch_contract_is_complete_and_secret_free() -> None:
         assert f"img.shields.io/badge/{badge}-" in readme
     for install_example in (
         "uv sync --extra dev",
+        "uv tool install --editable '.[all]'",
+        "uv tool update-shell",
+        "uv run openbola",
+        "command -v openbola",
+        "Get-Command openbola",
+        "LOCALAPPDATA\\OpenBOLA\\bin",
         "openbola setup",
         "openbola-VERSION-windows-x64.zip",
         "openbola-VERSION-macos-arm64.tar.gz",
@@ -93,6 +99,8 @@ def test_readme_launch_contract_is_complete_and_secret_free() -> None:
         "SHA256SUMS",
     ):
         assert install_example in readme
+    assert "official uv installation instructions" in readme
+    assert "CLI help until the P8 TUI lands" not in readme
 
     assert "examples/demo/openbola-demo.cast" in readme
     assert "docs/assets/openbola-social-preview.svg" in readme

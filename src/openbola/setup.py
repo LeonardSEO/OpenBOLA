@@ -29,6 +29,7 @@ from typing import Any, Final, Literal, Protocol, cast
 
 from openbola import __version__
 from openbola.paths import data_root
+from openbola.recovery import KeyringRecoveryKeyStore
 
 BrowserStatus = Literal["installed", "already_ready", "unavailable"]
 VaultStatus = Literal["ready", "unavailable"]
@@ -419,7 +420,13 @@ def run_setup(
     # This avoids a partial setup that could launch capture but cannot support
     # the crash-recovery guarantees required by P6.
     if vault is None:
-        return _result("unavailable", "unavailable", "failed", "vault_unavailable")
+        # Production setup uses the platform vault adapter.  Unsupported or
+        # unavailable backends still fail closed through the self-test below.
+        # Dependency-injected test adapters keep the historical explicit-vault
+        # contract so a missing test vault cannot touch a browser installer.
+        if installer is not None or selected_self_test is not None:
+            return _result("unavailable", "unavailable", "failed", "vault_unavailable")
+        vault = KeyringRecoveryKeyStore()
     try:
         _run_vault_self_test(vault)
     except SetupError as error:

@@ -40,6 +40,9 @@ class AuditEventType(StrEnum):
     OWNERSHIP_IMPORTED = "ownership_imported"
     OWNERSHIP_EVIDENCE_PERSISTED = "ownership_evidence_persisted"
     PROBE_ATTEMPT_RECORDED = "probe_attempt_recorded"
+    MUTATION_OUTCOME_RECORDED = "mutation_outcome_recorded"
+    RECOVERY_TRANSITION = "recovery_transition"
+    RECOVERY_ESCALATED = "recovery_escalated"
     LEGACY_EVENT_REDACTED = "legacy_event_redacted"
 
 

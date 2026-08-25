@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -21,9 +22,19 @@ from openbola.mutations import (
     MutationSweepExecutor,
     preflight_sweep,
 )
+from openbola.recovery import AESGCMJournal
 from openbola.scope import MutationRecordScope, ScopeGuard
 
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+
+
+class _RecoveryVault:
+    def get_or_create_key(self) -> bytes:
+        return b"m" * 32
+
+
+def _journal(tmp_path: Path) -> AESGCMJournal:
+    return AESGCMJournal(tmp_path / "mutation.journal", _RecoveryVault())
 
 
 def _scope_file(
@@ -316,13 +327,165 @@ def test_sweep_orders_snapshot_canary_attacker_restore_and_verify(tmp_path: Path
         limits=ExecutorLimits(requests_per_second=1_000),
     )
     plan = preflight_sweep((candidate,), guard, now=NOW)
-    outcomes = MutationSweepExecutor(probe, registry).sweep(plan)
+    outcomes = MutationSweepExecutor(probe, registry, journal=_journal(tmp_path)).sweep(plan)
 
     assert [method for method, _ in calls] == ["GET", "PATCH", "GET", "PATCH", "GET"]
     assert calls[2][1] == "Bearer attacker"
     assert calls[1][1] == calls[3][1] == calls[4][1] == "Bearer owner"
     assert outcomes[0].status == "verified"
     assert "old@example.test" not in repr(outcomes)
+
+
+@pytest.mark.parametrize("snapshot_value", [True, None, {"nested": "value"}])
+def test_sweep_fails_closed_for_unsupported_snapshot_values(
+    tmp_path: Path, snapshot_value: object
+) -> None:
+    guard = _guard(tmp_path, record_scope="explicit")
+    candidate = _candidate()
+    vault = CredentialVault()
+    owner_ref = vault.store(
+        identity="owner", kind=CredentialKind.BEARER, name="authorization", secret="owner"  # noqa: S106
+    )
+    attacker_ref = vault.store(
+        identity="attacker", kind=CredentialKind.BEARER, name="authorization", secret="attacker"  # noqa: S106
+    )
+    object.__setattr__(candidate.target, "owner_credential", owner_ref)
+    object.__setattr__(candidate.target, "attacker_credential", attacker_ref)
+    registry = InMemorySessionValueRegistry()
+    object.__setattr__(
+        candidate,
+        "original_value",
+        registry.store_value(kind="field_value", value="stale"),
+    )
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(200, json={"email": snapshot_value})
+
+    probe = ProbeExecutor(
+        guard,
+        vault,
+        transport=httpx.MockTransport(handler),
+        now=NOW,
+        limits=ExecutorLimits(requests_per_second=1_000),
+    )
+    plan = preflight_sweep((candidate,), guard, now=NOW)
+    outcomes = MutationSweepExecutor(probe, registry, journal=_journal(tmp_path)).sweep(plan)
+
+    assert outcomes[0].status == "inconclusive"
+    assert outcomes[0].error_code == "snapshot_failed"
+    assert calls == ["GET"]
+
+
+def test_sweep_uses_live_top_level_snapshot_not_registry_or_first_leaf(tmp_path: Path) -> None:
+    guard = _guard(tmp_path, record_scope="explicit")
+    candidate = _candidate()
+    vault = CredentialVault()
+    owner_ref = vault.store(
+        identity="owner", kind=CredentialKind.BEARER, name="authorization", secret="owner"  # noqa: S106
+    )
+    attacker_ref = vault.store(
+        identity="attacker", kind=CredentialKind.BEARER, name="authorization", secret="attacker"  # noqa: S106
+    )
+    object.__setattr__(candidate.target, "owner_credential", owner_ref)
+    object.__setattr__(candidate.target, "attacker_credential", attacker_ref)
+    registry = InMemorySessionValueRegistry()
+    object.__setattr__(
+        candidate,
+        "original_value",
+        registry.store_value(kind="field_value", value="stale"),
+    )
+
+    class RecordingJournal:
+        def __init__(self) -> None:
+            self.commits: list[dict[str, object]] = []
+            self.clears = 0
+
+        def commit(self, **kwargs: object) -> None:
+            self.commits.append(kwargs)
+
+        def clear(self) -> None:
+            self.clears += 1
+
+    journal = RecordingJournal()
+    patch_bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PATCH":
+            patch_bodies.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"email": "canary-record-1"})
+        if request.headers["authorization"] == "Bearer attacker":
+            return httpx.Response(200, json={"email": "canary-record-1"})
+        return httpx.Response(
+            200,
+            json={
+                "unrelated": "first-leaf",
+                "email": "live@example.test",
+                "nested": {"email": "nested"},
+            },
+        )
+
+    probe = ProbeExecutor(
+        guard,
+        vault,
+        transport=httpx.MockTransport(handler),
+        now=NOW,
+        limits=ExecutorLimits(requests_per_second=1_000),
+    )
+    plan = preflight_sweep((candidate,), guard, now=NOW)
+    outcomes = MutationSweepExecutor(probe, registry, journal=journal).sweep(plan)
+
+    assert outcomes[0].status == "verified"
+    assert journal.commits[0]["original_value"] == "live@example.test"
+    assert patch_bodies == [{"email": "canary-record-1"}, {"email": "live@example.test"}]
+    assert journal.clears == 1
+
+
+def test_sweep_restore_requires_exact_json_type(tmp_path: Path) -> None:
+    guard = _guard(tmp_path, record_scope="explicit")
+    candidate = _candidate()
+    vault = CredentialVault()
+    owner_ref = vault.store(
+        identity="owner", kind=CredentialKind.BEARER, name="authorization", secret="owner"  # noqa: S106
+    )
+    attacker_ref = vault.store(
+        identity="attacker", kind=CredentialKind.BEARER, name="authorization", secret="attacker"  # noqa: S106
+    )
+    object.__setattr__(candidate.target, "owner_credential", owner_ref)
+    object.__setattr__(candidate.target, "attacker_credential", attacker_ref)
+    registry = InMemorySessionValueRegistry()
+    object.__setattr__(
+        candidate,
+        "original_value",
+        registry.store_value(kind="field_value", value="stale"),
+    )
+    owner_reads = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal owner_reads
+        if request.method == "GET" and request.headers["authorization"] == "Bearer owner":
+            owner_reads += 1
+            # The snapshot is an integer; restore verification deliberately
+            # returns a string with the same textual representation.
+            value: object = 7 if owner_reads == 1 else "7"
+            return httpx.Response(200, json={"email": value})
+        if request.method == "GET":
+            return httpx.Response(200, json={"email": "canary-record-1"})
+        return httpx.Response(200, json={"email": "canary-record-1"})
+
+    probe = ProbeExecutor(
+        guard,
+        vault,
+        transport=httpx.MockTransport(handler),
+        now=NOW,
+        limits=ExecutorLimits(requests_per_second=1_000),
+    )
+    plan = preflight_sweep((candidate,), guard, now=NOW)
+    outcomes = MutationSweepExecutor(probe, registry, journal=_journal(tmp_path)).sweep(plan)
+
+    assert outcomes[0].error_code == "cleanup_unverified"
+    assert outcomes[0].restore_verified is False
 
 
 def test_sweep_stops_after_unverified_restore_and_skips_later_records(tmp_path: Path) -> None:
@@ -361,7 +524,7 @@ def test_sweep_stops_after_unverified_restore_and_skips_later_records(tmp_path: 
         limits=ExecutorLimits(requests_per_second=1_000),
     )
     plan = preflight_sweep(MutationCandidateInventory((first, second), True), guard, now=NOW)
-    outcomes = MutationSweepExecutor(probe, registry).sweep(plan)
+    outcomes = MutationSweepExecutor(probe, registry, journal=_journal(tmp_path)).sweep(plan)
 
     assert outcomes[0].error_code == "cleanup_unverified"
     assert outcomes[1].status == "skipped"

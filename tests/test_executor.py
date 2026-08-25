@@ -211,6 +211,96 @@ def test_request_scoped_returns_only_bounded_metadata(tmp_path: Path) -> None:
     assert calls == [("GET", "Bearer owner-token")]
 
 
+def test_request_scoped_keeps_only_the_exact_top_level_scalar(tmp_path: Path) -> None:
+    import pickle
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "unrelated": "first-leaf-must-not-win",
+                "email": "live@example.test",
+                "nested": {"email": "nested@example.test"},
+            },
+        )
+
+    executor, vault = _executor(tmp_path, handler)
+    target = _target(vault)
+    exchange = executor.request_scoped(
+        target,
+        target.owner_credential,
+        method="GET",
+        endpoint_template=target.endpoint_template,
+        body=None,
+        content_type=None,
+        id_field="email",
+    )
+
+    assert exchange.field_present is True
+    assert exchange.field_scalar is True
+    assert exchange.field_value == "live@example.test"
+    assert "live@example.test" not in repr(exchange)
+    with pytest.raises(TypeError, match="cannot be serialized"):
+        pickle.dumps(exchange)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"nested": {"email": "nested@example.test"}},
+        {"email": True},
+        {"email": None},
+        {"email": {"value": "composite"}},
+    ],
+)
+def test_request_scoped_marks_missing_or_unsupported_top_level_field(
+    tmp_path: Path, payload: dict[str, Any]
+) -> None:
+    executor, vault = _executor(tmp_path, lambda request: httpx.Response(200, json=payload))
+    target = _target(vault)
+    exchange = executor.request_scoped(
+        target,
+        target.owner_credential,
+        method="GET",
+        endpoint_template=target.endpoint_template,
+        body=None,
+        content_type=None,
+        id_field="email",
+    )
+
+    expected_present = "email" in payload
+    assert exchange.field_present is expected_present
+    assert exchange.field_scalar is False
+    assert exchange.field_value is None
+
+
+def test_request_scoped_rejects_ambiguous_duplicate_json_fields(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            content=b'{"email":"first","email":"second"}',
+            headers={"content-type": "application/json"},
+        )
+
+    executor, vault = _executor(tmp_path, handler)
+    target = _target(vault)
+    exchange = executor.request_scoped(
+        target,
+        target.owner_credential,
+        method="GET",
+        endpoint_template=target.endpoint_template,
+        body=None,
+        content_type=None,
+        id_field="email",
+    )
+
+    assert exchange.field_present is False
+    assert exchange.field_scalar is False
+    assert exchange.object_values == ()
+
+
 def test_request_scoped_rejects_query_and_fragment_endpoints(tmp_path: Path) -> None:
     executor, vault = _executor(
         tmp_path,

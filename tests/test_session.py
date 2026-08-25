@@ -108,7 +108,9 @@ def test_capture_requires_two_distinct_identities(tmp_path: Path) -> None:
         session.add_identity(_identity("attacker", "two"))
         session.start_capture(token)
         assert session.wait_for_idle(2)
-        assert session.phase is SessionPhase.DISCOVERY
+        # A production session cannot silently treat a missing capture engine
+        # as success; it remains failed/guarded until an engine is injected.
+        assert session.phase is SessionPhase.CAPTURE
     finally:
         session.close()
 
@@ -146,7 +148,10 @@ def test_discovery_only_advances_when_complete(tmp_path: Path) -> None:
     ) -> DiscoverySummary:
         return DiscoverySummary(1, 2, 3, 4, False)
 
-    session = AssessmentSession(discovery=discovery)  # type: ignore[arg-type]
+    session = AssessmentSession(
+        capture=lambda _guard, _identities, _token: None,
+        discovery=discovery,
+    )  # type: ignore[arg-type]
     token = SessionCancellationToken()
     try:
         session.configure_target(
@@ -191,8 +196,37 @@ def test_manual_escalation_blocks_new_work() -> None:
     session = AssessmentSession()
     try:
         status = session.record_manual_escalation()
-        assert status == RecoveryStatus("escalated", True, "manual_escalation")
+        assert status == RecoveryStatus("blocked", True, "recovery_required")
         with pytest.raises(SessionError, match="target cannot"):
             session.configure_target(target_url="https://api.example.test", scope_path=Path("x"))
+    finally:
+        session.close()
+
+
+def test_manual_escalation_uses_injected_append_only_callback() -> None:
+    session = AssessmentSession(
+        escalation=lambda: RecoveryStatus("escalated", True, "manual_escalation")
+    )
+    try:
+        assert session.record_manual_escalation() == RecoveryStatus(
+            "escalated", True, "manual_escalation"
+        )
+    finally:
+        session.close()
+
+
+def test_recovery_status_requeries_provider_when_journal_appears() -> None:
+    statuses = iter(
+        (
+            RecoveryStatus("clear", False, None),
+            RecoveryStatus("required", True, "journal_present"),
+        )
+    )
+    session = AssessmentSession(recovery_status=lambda: next(statuses))
+    try:
+        assert session.recovery_status() == RecoveryStatus("required", True, "journal_present")
+        # A provider that has no further state is fail-closed rather than
+        # retaining the earlier clear snapshot.
+        assert session.recovery_status() == RecoveryStatus("blocked", True, "recovery_blocked")
     finally:
         session.close()

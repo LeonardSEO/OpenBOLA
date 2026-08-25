@@ -32,12 +32,11 @@ plans before it.
    contract (spec §5), isolated per-identity browser contexts, scope
    enforcement on navigation/replay, sanitized persistent traffic vs.
    memory-only replay material (spec §7 step 4, §8).
-   *Status: complete, merged to main (2026-08-24). Deferred to P8:
-   `LoginRecipe.start_url` rejects query parameters (real SSO entry points
-   often need them); `capture_har`'s `registry` param isn't hasattr-checked;
-   avoid `show_locals`-style traceback rendering anywhere in the
-   capture/login path (a resolved secret can linger in frame locals across
-   the extra-fields fill loop).*
+   *Status: complete, merged to main (2026-08-24), with the deferred P8
+   integration items closed locally on 2026-08-25: SSO start URLs may contain
+   query parameters but never fragments or userinfo, `capture_har` validates
+   the registry capability before login, and the capture/login boundary emits
+   only fixed safe errors without local-variable traceback rendering.*
 4. **P4 — Resource/provider inventory**. `ResourceInventory`/
    `ProviderAdapter` contracts (spec §5) plus the four required adapters:
    generic HTTP/OpenAPI/GraphQL, Supabase/PostgREST, Firebase, Hasura, each
@@ -174,7 +173,7 @@ plans before it.
    `FieldInventory` still tracks field *names* only, while P7 retains its
    sanitized-only reporting boundary. Full values remain forbidden in state,
    reports, AI payloads, MCP, and serialization; acceptance criterion 8 is
-   therefore now owned by the unfinished P8 active-session/TUI work.
+   closed by P8's active-session registry lifecycle and TUI boundary tests.
 5. **P5 — BYOK AI planning**. `AIProviderConfig`/`ProposedTest` contracts,
    `openai_compatible` + `azure_openai` clients, sanitized-context builder,
    and the validator that intersects every proposed handle/method/field/path
@@ -188,7 +187,18 @@ plans before it.
    `MutationGrant` into the executor: snapshot → canary → verify → restore →
    verify-restore per record, `all_discovered` auto-expansion with no silent
    sampling, AES-GCM recovery journal keyed via the OS vault, startup
-   recovery gate (spec §6, §8, acceptance criteria 6–7).
+   recovery gate (spec §6, §8, acceptance criteria 6–7). **Status: complete
+   locally (2026-08-25).** Mutation writes now require an encrypted recovery
+   journal before dispatch, recovery revalidates the current scope and grant,
+   and exact typed live snapshot values are restored and verified before the
+   journal is cleared. `openbola recover --scope PATH` provides the explicit,
+   scope- and grant-bound production recovery route. macOS uses Keychain and
+   Windows uses Credential Manager through a native-only keyring boundary.
+   Acceptance checks:
+   `uv run pytest tests/test_mutations.py tests/test_recovery.py
+   tests/test_mutation_boundary.py tests/test_executor.py tests/test_state.py -q`
+   (116 passed), `uv run ruff check .`, `uv run mypy src`, and `uv run pytest -q`
+   (668 passed).
 7. **P7 — Typed findings & new export formats**. **Status: complete, merged to
    main (2026-08-24).** The report boundary now uses immutable typed
    `FindingEvidence`/`CapabilityProof` contracts with a legacy-safe adapter;
@@ -204,20 +214,37 @@ plans before it.
    review/verification/findings/export/recovery screens (spec §7, §10)
    wired to the engine from P1–P7 through session services (config,
    progress events, cancellation). `openbola` with no args launches this.
+   **Status: TUI shell complete locally; production engine-service binding is
+   still open (2026-08-25).** The Textual flow is covered at 80x24, delegates
+   through typed session operations, revalidates scope binding
+   before grant confirmation, filters sensitive projections, enforces the P6
+   startup gate, clears finding detail state on navigation, and restricts
+   export to the six P7 artifact names. Acceptance checks:
+   `uv run pytest tests/test_tui.py tests/test_tui_boundary.py
+   tests/test_session.py tests/test_cli.py -q` (35 passed),
+   `uv run ruff check .`, `uv run mypy src`, and `uv run pytest -q`
+   (668 passed). A PTY smoke also confirmed that `uv run openbola` renders the
+   full-screen Home screen and exits cleanly with `q`.
+   The default no-argument session currently fails closed when capture or
+   discovery is requested because production capture/discovery callbacks are
+   not yet bound; recovery itself is available through the explicit CLI command.
 9. **P9 — Setup/doctor/report/update subcommands**. `openbola setup`
    (Playwright browser install + self-test), `openbola doctor`,
    `openbola report RUN`, `openbola update` (GitHub Release check, checksum
    verify, explicit-confirm replace), local read-only `openbola mcp` reusing
    the renamed MCP server from P1. **P9 command/services are implemented;
    acceptance remains gated by a ScopeGuard-aware browser provisioner and an
-   explicit distribution scope for update traffic. The no-argument TUI launch
-   remains the P8 gate.**
+   explicit distribution scope for update traffic. Recovery-vault setup,
+   diagnostics, and the no-argument TUI launch are now integrated; an absent
+   browser is reported as a local prerequisite instead of bypassing
+   `ScopeGuard`.**
 10. **P10 — Distribution packaging**. PyInstaller specs for the three
     platform targets, `install.sh`/`install.ps1`, `SHA256SUMS`, release
     workflow. **P10 local packaging implementation is complete.** *This
     machine is macOS — the Windows x64 build, macOS x64 build, clean-machine
-    acceptance, and Textual-inclusive bundle require native CI/target evidence
-    after P8 lands; this plan does not claim those artifacts from this checkout.*
+    acceptance require native CI/target evidence. Textual is now included in
+    the runtime dependency graph and local packaging contracts, but this plan
+    does not claim unobserved native artifacts from this checkout.*
 11. **P11 — Visual design & GitHub launch**. README hero/badges/demo,
     social-preview image, repository rename/topics/security URL. **P11 local launch materials complete; external GitHub launch pending approval.** The
     approval-gated checklist is [docs/launch/github-launch-checklist.md](../../launch/github-launch-checklist.md);

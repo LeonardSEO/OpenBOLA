@@ -112,7 +112,8 @@ _JSON_ENUM_VALUES: dict[str, frozenset[str]] = {
     ),
     "confidence": frozenset(confidence.value for confidence in OwnershipConfidence),
     "severity": frozenset({"critical", "high", "medium", "low", "info"}),
-    "status": frozenset(verdict.value for verdict in Verdict),
+    "status": frozenset(verdict.value for verdict in Verdict)
+    | frozenset({"verified", "inconclusive", "skipped"}),
 }
 
 
@@ -1863,6 +1864,38 @@ class StateStore:
         data_json = _json_document(data)
         with self._connection() as connection:
             return self._add_audit_event(connection, validated_event_type, data_json, run_id)
+
+    def record_mutation_outcome(
+        self,
+        record_handle: str,
+        *,
+        status: str,
+        mutation_verified: bool,
+        restore_verified: bool,
+        run_id: int | None = None,
+    ) -> int:
+        """Append a handle-only mutation result to the audit trail.
+
+        The record handle is hashed before persistence; restore material,
+        object IDs, credentials, and response bodies never enter SQLite.
+        """
+
+        if not isinstance(record_handle, str) or not record_handle:
+            raise ValueError("mutation record handle is invalid")
+        if status not in {"verified", "inconclusive", "skipped"}:
+            raise ValueError("mutation outcome status is invalid")
+        if type(mutation_verified) is not bool or type(restore_verified) is not bool:
+            raise ValueError("mutation outcome flags are invalid")
+        return self.add_audit_event(
+            AuditEventType.MUTATION_OUTCOME_RECORDED,
+            {
+                "object_ref": object_ref_fingerprint(record_handle),
+                "status": status,
+                "mutation_verified": mutation_verified,
+                "restore_verified": restore_verified,
+            },
+            run_id=run_id,
+        )
 
     def _add_audit_event(
         self,

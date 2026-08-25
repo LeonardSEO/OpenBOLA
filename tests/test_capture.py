@@ -813,7 +813,7 @@ def test_login_recipe_rejects_empty_name() -> None:
         "not-a-url",
         "ftp://app.example.test/login",
         "https://user:pass@app.example.test/login",
-        "https://app.example.test/login?next=/x",
+        "https://app.example.test/login#fragment",
     ],
 )
 def test_login_recipe_rejects_unsafe_start_url(bad_start_url: str) -> None:
@@ -831,6 +831,23 @@ def test_login_recipe_rejects_unsafe_start_url(bad_start_url: str) -> None:
             username_secret=recipe.username_secret,
             password_secret=recipe.password_secret,
         )
+
+
+def test_login_recipe_allows_sso_query_parameters() -> None:
+    from openbola.capture import LoginRecipe
+
+    recipe, _ = _valid_login_recipe()
+    configured = LoginRecipe(
+        name=recipe.name,
+        start_url="https://app.example.test/login?next=%2Fcallback&tenant=example",
+        username_selector=recipe.username_selector,
+        password_selector=recipe.password_selector,
+        submit_selector=recipe.submit_selector,
+        success_url_pattern=recipe.success_url_pattern,
+        username_secret=recipe.username_secret,
+        password_secret=recipe.password_secret,
+    )
+    assert configured.start_url.endswith("next=%2Fcallback&tenant=example")
 
 
 def test_login_recipe_rejects_empty_success_url_pattern() -> None:

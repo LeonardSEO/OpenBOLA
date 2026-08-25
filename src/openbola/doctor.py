@@ -23,6 +23,7 @@ from typing import Literal, Protocol, cast
 
 from openbola import __version__
 from openbola.paths import data_root
+from openbola.recovery import default_recovery_gate
 
 DiagnosticStatus = Literal["ok", "warning", "blocked"]
 RecoveryState = Literal["clear", "required", "escalated", "blocked"]
@@ -551,7 +552,13 @@ def run_doctor(
     )
     diagnostics.append(Diagnostic("state", state_result.status, state_result.code))
 
-    recovery, recovery_state = _recovery_diagnostic(recovery_gate)
+    selected_recovery = recovery_gate
+    if selected_recovery is None:
+        try:
+            selected_recovery = default_recovery_gate(root=selected_root)
+        except Exception:
+            selected_recovery = None
+    recovery, recovery_state = _recovery_diagnostic(selected_recovery)
     diagnostics.append(recovery)
     diagnostics.sort(key=lambda item: item.name)
     return DiagnosticReport(tuple(diagnostics), recovery_state)

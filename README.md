@@ -59,13 +59,12 @@ these contracts:
 | Provider discovery | `providers/` | Generic HTTP plus Hasura, Supabase, PostgREST, and Firebase evidence adapters |
 | Local MCP adapter | `mcp_server.py` | Optional stdio adapter around a testable service; FastMCP is lazy-loaded |
 | Reports | `reporting.py` | Deterministic `report.html`, `report.csv`, `report.json`, `report.md`, `junit.xml`, and `report.sarif` output |
-| CLI/TUI | `cli.py`, `pipeline.py`, `session.py` | Headless, scope-enforced commands with machine-safe JSON mode; the Textual TUI is the open P8 integration gate |
+| CLI/TUI | `cli.py`, `pipeline.py`, `session.py` | A Textual TUI for the no-argument launch plus headless, scope-enforced commands with machine-safe JSON mode |
 | Local demo | `mock_target.py` | Ephemeral `127.0.0.1` vulnerable and protected endpoints |
 
-The planned no-argument `openbola` entry point will open the local TUI once the
-P8 Textual integration lands. Until then, invoking it without a subcommand
-shows the bounded CLI help; headless commands remain available for CI and
-automation.
+Running `openbola` without a subcommand opens the local Textual TUI. Use the
+subcommands documented below for headless work and CI; they retain the same
+ScopeGuard, credential, mutation, and audit boundaries.
 Credentials are supplied only by environment-variable references; a traffic
 HAR is sanitized on import and cannot provide a replay token or response-body
 ownership evidence by itself. Use a bounded, sanitized records JSON file (via
@@ -108,34 +107,148 @@ non-negotiable rules are:
 See [SECURITY.md](SECURITY.md) for disclosure guidance and [LICENSE](LICENSE)
 for the Apache-2.0 terms.
 
-## Install for development
+## Install OpenBOLA
 
-Python 3.11 or newer and `uv` are required for the development workflow. From
-a checkout:
+The quickest way to make the `openbola` command available in a new shell is a
+user-scoped `uv tool` installation from this checkout. OpenBOLA requires Python
+3.11 or newer. `uv` can use an existing Python installation; when one is not
+available, install a managed interpreter with `uv python install 3.11`.
+
+If you do not have a checkout yet, clone the repository and enter it first:
+
+```bash
+git clone https://github.com/LeonardSEO/OpenBOLA.git
+cd OpenBOLA
+```
+
+### 1. Install `uv`
+
+Use the [official uv installation instructions](https://docs.astral.sh/uv/getting-started/installation/).
+The standalone installer commands are:
+
+```bash
+# macOS or Linux (zsh/bash)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+```powershell
+# Windows PowerShell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Open a new terminal if the installer added `uv` to `PATH`, then verify it:
+
+```text
+uv --version
+```
+
+### 2. Install the checkout as a command
+
+From the repository root (the directory containing `pyproject.toml`), run:
+
+```bash
+uv tool install --editable '.[all]'
+uv tool update-shell
+```
+
+`--editable` keeps the command connected to this checkout, and `[all]` adds
+the optional browser-capture and local MCP dependencies. `uv tool update-shell`
+adds uv's tool executable directory to the relevant shell configuration when it
+is not already on `PATH`.
+
+Close and reopen the terminal (or start a new shell) after `uv tool update-shell`.
+Then verify the command in that new shell:
+
+```bash
+# macOS/Linux
+command -v openbola
+openbola --version
+openbola doctor
+```
+
+```powershell
+# Windows PowerShell
+Get-Command openbola
+openbola --version
+openbola doctor
+```
+
+The first `doctor` run may report a warning until the local browser, vault, or
+recovery prerequisites have been provisioned. It is a read-only diagnostic and
+does not contact a target. Run `openbola setup` only when you need those local
+prerequisites; setup performs a local self-test and never navigates to a target.
+If the diagnostic says that a browser is unavailable, provision the pinned
+browser through your approved local deployment process and run setup again.
+
+At this point, `openbola` (without a subcommand) opens the TUI. `openbola scan`
+and the other headless commands remain available for scripts and CI.
+
+### Development checkout
+
+For contributing or running the test suite, create the project environment:
 
 ```bash
 uv sync --extra dev
+```
+
+You can activate it and use commands directly:
+
+```bash
+# macOS/Linux
+source .venv/bin/activate
+openbola --version
+openbola
+```
+
+```powershell
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+openbola --version
+openbola
+```
+
+Or leave the shell untouched and prefix project commands with `uv run`:
+
+```text
+uv run openbola --version
+uv run openbola
 uv run ruff check .
 uv run mypy src
 uv run pytest
 ```
 
-For a packaged native bundle, extract the archive for your platform, verify
-`SHA256SUMS` and the bundle's `openbola.sha256`, then run its local installer.
-The installer never downloads code and asks before editing `PATH`:
+The development environment does not include optional capture/MCP packages by
+default. Add them when needed with `uv sync --extra dev --extra all`.
+
+### Native release bundles
+
+Native bundles are produced by the release workflow for Windows x64, macOS
+arm64, and macOS x64. They are not generated by this source checkout. When a
+release bundle is available, download the archive for the exact platform,
+verify both its line in `SHA256SUMS` and the extracted `openbola.sha256`
+manifest, and only then run the local installer. The installer copies the
+already-built executable; it does not download code.
+
+On macOS, the installer defaults to `$HOME/.local/bin` and asks before editing
+your shell `PATH`:
 
 ```bash
-# macOS: ./install.sh --bin-dir "$HOME/.local/bin" --yes --no-path
-# Windows PowerShell: .\install.ps1 -BinDir "$HOME\\.local\\bin" -Yes -NoPath
-openbola setup
+./install.sh --yes
 ```
 
-`openbola setup` prepares the pinned browser and local credential-vault
-prerequisites, then runs a local self-test. The browser binary remains an
-operator-managed dependency; setup never navigates to a target. Optional
-capture and local MCP support are installed with `uv sync --extra all` when
-needed. Native acceptance for Windows x64 and macOS x64 is provided by the
-P10 CI matrix, not inferred from this macOS arm64 checkout.
+On Windows, the installer defaults to the user directory
+`$env:LOCALAPPDATA\OpenBOLA\bin` (not a Unix-style `$HOME\.local\bin`) and
+asks before adding that directory to the user `PATH`:
+
+```powershell
+.\install.ps1 -Yes
+```
+
+After accepting the PATH prompt, open a new terminal and verify with
+`Get-Command openbola` and `openbola --version`. For a non-interactive install,
+use `-NoPath` and add the shown directory to the calling environment yourself.
+Native acceptance is platform-specific; do not infer Windows or macOS x64
+installer proof from a different host checkout.
 
 ## Working with a scope
 
@@ -211,13 +324,14 @@ combinations remain visible in the summary and limitations.
 ## CLI and headless CI
 
 The same safety contracts are available to scripts and CI through these
-headless commands. The no-argument Textual launch remains a P8 milestone:
+headless commands. Running `openbola` by itself opens the local TUI:
 
 ```text
-openbola                         # CLI help until the P8 TUI lands
+openbola                         # open the local Textual TUI
 openbola scan                    # read-only assessment
 openbola setup                   # browser, vault, and local self-test
 openbola doctor                  # platform and recovery diagnostics
+openbola recover --scope PATH    # explicitly restore a pending mutation
 openbola report RUN              # reopen a sanitized report
 openbola update                  # check and explicitly confirm an update
 openbola mcp                     # local read-only stdio adapter

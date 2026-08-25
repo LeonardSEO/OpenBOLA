@@ -15,6 +15,7 @@ from openbola.cli import app
 from openbola.doctor import Diagnostic, DiagnosticReport
 from openbola.mcp_server import MCPServiceError
 from openbola.mock_target import DEMO_OBJECT_ID, MockTarget
+from openbola.mutations import RecoveryStatus
 from openbola.scope import ScopeGuard
 from openbola.setup import SetupResult
 from openbola.updates import UpdateResult
@@ -547,3 +548,41 @@ def test_update_service_exception_is_generic_in_both_output_modes(
     assert json.loads(json_result.stdout) == {"ok": False, "error": "update_denied"}
     assert sentinel not in json_result.stdout
     assert sentinel not in rich_result.stdout
+
+
+def test_recover_command_requires_explicit_scope_and_emits_bounded_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seen: list[Path] = []
+
+    def fake_recover(scope: Path) -> RecoveryStatus:
+        seen.append(scope)
+        return RecoveryStatus("clear", False, "recovery_clear")
+
+    monkeypatch.setattr(cli_module, "recover_pending_mutation", fake_recover)
+    scope = tmp_path / "scope.yaml"
+    result = CliRunner().invoke(app, ["recover", "--scope", str(scope), "--json"])
+    assert result.exit_code == 0
+    assert seen == [scope]
+    assert json.loads(result.stdout) == {
+        "ok": True,
+        "reason_code": "recovery_clear",
+        "status": "clear",
+    }
+
+
+def test_recover_command_never_exposes_adapter_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sentinel = "RECOVERY_SECRET_SENTINEL"
+
+    def fail(_scope: Path) -> RecoveryStatus:
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(cli_module, "recover_pending_mutation", fail)
+    result = CliRunner().invoke(app, ["recover", "--scope", str(tmp_path / "scope.yaml"), "--json"])
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == {"ok": False, "error": "recovery_failed"}
+    assert sentinel not in result.stdout

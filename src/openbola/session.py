@@ -41,6 +41,9 @@ _SAFE_REASON_CODES = frozenset(
     }
 )
 _MAX_MESSAGE_LENGTH = 160
+_EXPECTED_ARTIFACT_NAMES = frozenset(
+    {"report.html", "report.csv", "report.json", "report.md", "junit.xml", "report.sarif"}
+)
 
 
 class SessionPhase(StrEnum):
@@ -211,7 +214,17 @@ CaptureOperation = Callable[[ScopeGuard, tuple[IdentitySummary, ...], Cancellati
 DiscoveryOperation = Callable[
     [ScopeGuard, tuple[IdentitySummary, ...], CancellationToken], DiscoverySummary
 ]
+GrantOperation = Callable[[ScopeGuard, DiscoverySummary], GrantSummary]
+ConfirmGrantOperation = Callable[[ScopeGuard, GrantSummary], None]
+VerificationOperation = Callable[
+    [ScopeGuard, GrantSummary, CancellationToken], None
+]
+FindingsOperation = Callable[[], Sequence[Mapping[str, object]]]
+FindingDetailOperation = Callable[[str], Mapping[str, object]]
+ExportOperation = Callable[[Path], Mapping[str, Path]]
 RecoveryOperation = Callable[[], RecoveryStatus]
+RecoveryStatusOperation = Callable[[], RecoveryStatus]
+EscalationOperation = Callable[[], RecoveryStatus]
 
 
 class SessionController(Protocol):
@@ -263,12 +276,28 @@ class AssessmentSession:
         registry: SessionValueStore | None = None,
         capture: CaptureOperation | None = None,
         discovery: DiscoveryOperation | None = None,
+        grant: GrantOperation | None = None,
+        confirm_grant: ConfirmGrantOperation | None = None,
+        verification: VerificationOperation | None = None,
+        findings: FindingsOperation | None = None,
+        finding_detail: FindingDetailOperation | None = None,
+        export: ExportOperation | None = None,
         recovery: RecoveryOperation | None = None,
+        recovery_status: RecoveryStatusOperation | None = None,
+        escalation: EscalationOperation | None = None,
     ) -> None:
         self._registry = registry or InMemorySessionValueRegistry()
         self._capture = capture
         self._discovery = discovery
+        self._grant = grant
+        self._confirm_grant = confirm_grant
+        self._verification = verification
+        self._findings = findings
+        self._finding_detail = finding_detail
+        self._export = export
         self._recovery = recovery
+        self._recovery_status_operation = recovery_status
+        self._escalation = escalation
         self._lock = RLock()
         self._callbacks: list[Callable[[ProgressEvent], None]] = []
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="openbola-session")
@@ -281,7 +310,10 @@ class AssessmentSession:
         self._identities: list[IdentitySummary] = []
         self._discovery_summary: DiscoverySummary | None = None
         self._grant_summary: GrantSummary | None = None
-        self._recovery_status = RecoveryStatus("clear", False, None)
+        initial = recovery_status() if recovery_status is not None else RecoveryStatus(
+            "clear", False, None
+        )
+        self._recovery_status = self._public_recovery(initial)
 
     @property
     def phase(self) -> SessionPhase:
@@ -323,6 +355,8 @@ class AssessmentSession:
     def configure_target(self, *, target_url: str, scope_path: Path) -> TargetSummary:
         with self._lock:
             self._require_open_locked()
+            if self._recovery_status.state != "clear":
+                raise SessionError("target cannot be configured while recovery gate is blocked")
             if self._phase not in (SessionPhase.HOME, SessionPhase.TARGET):
                 raise SessionError("target cannot be configured in the current phase")
         origin = _normalize_origin(target_url)
@@ -384,6 +418,8 @@ class AssessmentSession:
             self._require_open_locked()
             if self._phase is not SessionPhase.DISCOVERY:
                 raise SessionError("discovery cannot start in the current phase")
+            if self._recovery_status.state != "clear":
+                raise SessionError("recovery gate blocks discovery")
             self._phase = SessionPhase.DISCOVERY
             self._active_token = token
             self._emit_locked(
@@ -400,30 +436,140 @@ class AssessmentSession:
         return None
 
     def review_grant(self) -> GrantSummary:
-        raise SessionError("grant review is not available in this session adapter")
+        with self._lock:
+            self._require_open_locked()
+            if self._phase is not SessionPhase.AI_PLAN:
+                raise SessionError("grant review cannot start in the current phase")
+            summary = self._discovery_summary
+            guard = self._scope_guard
+            operation = self._grant
+        if summary is None or not summary.complete or guard is None:
+            raise SessionError("grant review requires complete discovery")
+        if operation is None:
+            raise SessionError("grant review is not available in this session adapter")
+        try:
+            result = operation(guard, summary)
+        except Exception:
+            raise SessionError("grant review failed") from None
+        if type(result) is not GrantSummary:
+            raise SessionError("grant review result is invalid")
+        if result.scope_digest != guard.scope_digest:
+            raise SessionError("grant review scope changed")
+        with self._lock:
+            self._require_open_locked()
+            self._grant_summary = result
+            self._phase = SessionPhase.GRANT_REVIEW
+        return result
 
     def confirm_grant(self) -> None:
-        raise SessionError("mutation grant confirmation is unavailable")
+        with self._lock:
+            self._require_open_locked()
+            if self._phase is not SessionPhase.GRANT_REVIEW or self._grant_summary is None:
+                raise SessionError("mutation grant is not ready for confirmation")
+            if self._recovery_status.state != "clear":
+                raise SessionError("recovery gate blocks mutation confirmation")
+            guard = self._scope_guard
+            summary = self._grant_summary
+            operation = self._confirm_grant
+            review = self._grant
+            discovery = self._discovery_summary
+        if guard is None:
+            raise SessionError("mutation grant scope is unavailable")
+        if summary.scope_digest != guard.scope_digest:
+            raise SessionError("mutation grant scope changed")
+        if review is None or discovery is None:
+            raise SessionError("mutation grant preflight is unavailable")
+        try:
+            refreshed = review(guard, discovery)
+        except Exception:
+            raise SessionError("mutation grant preflight failed") from None
+        if type(refreshed) is not GrantSummary or refreshed.scope_digest != summary.scope_digest:
+            raise SessionError("mutation grant preflight changed")
+        if operation is None:
+            raise SessionError("mutation grant confirmation is unavailable")
+        try:
+            operation(guard, summary)
+        except Exception:
+            raise SessionError("mutation grant confirmation failed") from None
+        with self._lock:
+            self._require_open_locked()
+            self._phase = SessionPhase.VERIFICATION
 
     def start_verification(self, token: CancellationToken) -> None:
-        del token
-        raise SessionError("verification is not available in this session adapter")
+        self._start_verification_worker(token)
 
     def list_findings(self) -> Sequence[Mapping[str, object]]:
-        raise SessionError("findings are not available in this session adapter")
+        with self._lock:
+            self._require_open_locked()
+            if self._phase not in (SessionPhase.FINDINGS, SessionPhase.EXPORT):
+                raise SessionError("findings are not available in the current phase")
+            operation = self._findings
+        if operation is None:
+            raise SessionError("findings are not available in this session adapter")
+        try:
+            result = operation()
+            return tuple(
+                cast(Mapping[str, object], _safe_projection(item))
+                for item in result
+            )
+        except Exception:
+            raise SessionError("findings are not available") from None
 
     def finding_detail(self, handle_id: str) -> Mapping[str, object]:
-        del handle_id
-        raise SessionError("finding details are not available in this session adapter")
+        if not isinstance(handle_id, str) or not _SAFE_HANDLE.fullmatch(handle_id):
+            raise SessionError("finding details are not available")
+        with self._lock:
+            self._require_open_locked()
+            if self._phase is not SessionPhase.FINDINGS:
+                raise SessionError("finding details are not available in the current phase")
+            operation = self._finding_detail
+        if operation is None:
+            raise SessionError("finding details are not available in this session adapter")
+        try:
+            return cast(Mapping[str, object], _safe_projection(operation(handle_id)))
+        except Exception:
+            raise SessionError("finding details are not available") from None
 
     def export(self, output_dir: Path) -> Mapping[str, Path]:
-        del output_dir
-        raise SessionError("export is not available in this session adapter")
+        if not isinstance(output_dir, Path):
+            raise TypeError("export directory is invalid")
+        with self._lock:
+            self._require_open_locked()
+            if self._phase not in (SessionPhase.FINDINGS, SessionPhase.EXPORT):
+                raise SessionError("export is not available in the current phase")
+            operation = self._export
+            self._phase = SessionPhase.EXPORT
+        if operation is None:
+            raise SessionError("export is not available in this session adapter")
+        try:
+            result = operation(output_dir)
+            artifacts: dict[str, Path] = {}
+            for key, value in result.items():
+                if not isinstance(key, str) or not isinstance(value, Path):
+                    continue
+                basename = Path(value).name
+                if basename in _EXPECTED_ARTIFACT_NAMES:
+                    artifacts[_safe_text_key(key)] = Path(basename)
+            if set(path.name for path in artifacts.values()) != _EXPECTED_ARTIFACT_NAMES:
+                raise SessionError("export artifact set is invalid")
+            return artifacts
+        except Exception:
+            raise SessionError("export failed") from None
 
     def recovery_status(self) -> RecoveryStatus:
         with self._lock:
             self._require_open_locked()
-            return self._public_recovery(self._recovery_status)
+            operation = self._recovery_status_operation
+            cached = self._recovery_status
+        if operation is None:
+            return self._public_recovery(cached)
+        try:
+            current = self._public_recovery(operation())
+        except Exception:
+            current = RecoveryStatus("blocked", True, "recovery_blocked")
+        with self._lock:
+            self._recovery_status = current
+        return current
 
     def recover(self) -> RecoveryStatus:
         return self._run_recovery("recovery")
@@ -431,9 +577,18 @@ class AssessmentSession:
     def record_manual_escalation(self) -> RecoveryStatus:
         with self._lock:
             self._require_open_locked()
-            self._recovery_status = RecoveryStatus("escalated", True, "manual_escalation")
+            operation = self._escalation
+        try:
+            status = operation() if operation is not None else RecoveryStatus(
+                "blocked", True, "recovery_required"
+            )
+            public = self._public_recovery(status)
+        except Exception:
+            public = RecoveryStatus("blocked", True, "recovery_blocked")
+        with self._lock:
+            self._recovery_status = public
             self._phase = SessionPhase.RECOVERY
-            return self._public_recovery(self._recovery_status)
+            return public
 
     def cancel(self) -> None:
         with self._lock:
@@ -480,6 +635,8 @@ class AssessmentSession:
             self._require_open_locked()
             if self._phase is not SessionPhase.IDENTITIES:
                 raise SessionError(f"{phase.value} cannot start in the current phase")
+            if self._recovery_status.state != "clear":
+                raise SessionError("recovery gate blocks assessment work")
             if not prerequisite():
                 raise SessionError(prerequisite_message)
             self._phase = phase
@@ -497,8 +654,9 @@ class AssessmentSession:
         try:
             if guard is None:
                 raise SessionError("capture prerequisites are missing")
-            if self._capture is not None:
-                self._capture(guard, identities, token)
+            if self._capture is None:
+                raise SessionError("capture service is unavailable")
+            self._capture(guard, identities, token)
             cancelled = token.is_cancelled()
         except Exception:
             self._finish_worker(SessionPhase.CAPTURE, ProgressState.FAILED, "capture failed", False)
@@ -517,11 +675,9 @@ class AssessmentSession:
         try:
             if guard is None:
                 raise SessionError("discovery prerequisites are missing")
-            summary = (
-                self._discovery(guard, identities, token)
-                if self._discovery is not None
-                else DiscoverySummary(0, 0, 0, 0, True)
-            )
+            if self._discovery is None:
+                raise SessionError("discovery service is unavailable")
+            summary = self._discovery(guard, identities, token)
             if type(summary) is not DiscoverySummary:
                 raise SessionError("discovery result is invalid")
             cancelled = token.is_cancelled()
@@ -538,6 +694,56 @@ class AssessmentSession:
             SessionPhase.DISCOVERY,
             ProgressState.CANCELLED if cancelled else ProgressState.SUCCEEDED,
             "discovery cancelled" if cancelled else "discovery complete",
+            False,
+        )
+
+    def _start_verification_worker(self, token: CancellationToken) -> None:
+        if not hasattr(token, "is_cancelled") or not hasattr(token, "cancel"):
+            raise TypeError("cancellation token is invalid")
+        with self._lock:
+            self._require_open_locked()
+            if self._phase is not SessionPhase.VERIFICATION:
+                raise SessionError("verification cannot start in the current phase")
+            if self._grant_summary is None or self._scope_guard is None:
+                raise SessionError("verification prerequisites are missing")
+            self._active_token = token
+            self._emit_locked(
+                ProgressEvent(
+                    SessionPhase.VERIFICATION,
+                    ProgressState.RUNNING,
+                    0,
+                    1,
+                    "verification running",
+                )
+            )
+            future = self._executor.submit(self._run_verification, token)
+            self._future = cast(Future[object], future)
+
+    def _run_verification(self, token: CancellationToken) -> None:
+        with self._lock:
+            guard = self._scope_guard
+            grant = self._grant_summary
+            operation = self._verification
+        try:
+            if guard is None or grant is None or operation is None:
+                raise SessionError("verification prerequisites are missing")
+            operation(guard, grant, token)
+            cancelled = token.is_cancelled()
+        except Exception:
+            self._finish_worker(
+                SessionPhase.VERIFICATION,
+                ProgressState.FAILED,
+                "verification failed",
+                False,
+            )
+            return
+        with self._lock:
+            if not self._closed and not cancelled:
+                self._phase = SessionPhase.FINDINGS
+        self._finish_worker(
+            SessionPhase.VERIFICATION,
+            ProgressState.CANCELLED if cancelled else ProgressState.SUCCEEDED,
+            "verification cancelled" if cancelled else "verification complete",
             False,
         )
 
@@ -562,7 +768,9 @@ class AssessmentSession:
             self._phase = SessionPhase.RECOVERY
             callback = self._recovery
         try:
-            status = callback() if callback is not None else RecoveryStatus("clear", False, None)
+            status = callback() if callback is not None else RecoveryStatus(
+                "blocked", True, "recovery_required"
+            )
             public = self._public_recovery(status)
         except Exception:
             public = RecoveryStatus("blocked", True, "recovery_blocked")
@@ -607,6 +815,59 @@ def _require_bounded_text(value: object, label: str, limit: int) -> None:
         raise ValueError(f"{label} is invalid")
     if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
         raise ValueError(f"{label} is invalid")
+
+
+_PRIVATE_PROJECTION_KEYS = frozenset(
+    {
+        "secret",
+        "password",
+        "cookie",
+        "authorization",
+        "credential",
+        "token",
+        "headers",
+        "request",
+        "url",
+        "value",
+        "body",
+        "response_body",
+        "object_id",
+        "record_id",
+        "endpoint_id",
+        "resource_id",
+        "id",
+        "original_value",
+        "journal",
+    }
+)
+
+
+def _safe_text_key(value: object) -> str:
+    if type(value) is not str or not _SAFE_HANDLE.fullmatch(value):
+        return "artifact"
+    return value
+
+
+def _safe_projection(value: object, *, depth: int = 0) -> object:
+    """Bound the controller-to-UI mapping without copying sensitive values."""
+
+    if depth > 2:
+        return "…"
+    if value is None or type(value) in (bool, int, float):
+        return value
+    if isinstance(value, str):
+        return " ".join(value.split())[:256]
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or key.casefold() in _PRIVATE_PROJECTION_KEYS:
+                continue
+            safe_key = _safe_text_key(key)
+            result[safe_key] = _safe_projection(item, depth=depth + 1)
+        return MappingProxyType(result)
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        return tuple(_safe_projection(item, depth=depth + 1) for item in value[:64])
+    return "[omitted]"
 
 
 def _normalize_origin(value: str) -> str:

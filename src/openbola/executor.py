@@ -23,8 +23,9 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn, SupportsIndex
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
@@ -178,6 +179,9 @@ class _ResponseSnapshot:
     content_type: str
     object_values: tuple[str, ...]
     body_fingerprint: str
+    field_present: bool
+    field_scalar: bool
+    field_value: str | int | float | None
 
 
 @dataclass(frozen=True)
@@ -201,9 +205,25 @@ class ScopedExchange:
 
     status: int | None
     body_fingerprint: str | None
-    object_values: tuple[str, ...]
+    object_values: tuple[str, ...] = dataclass_field(repr=False)
     error_code: str | None = None
     sent: bool = False
+    field_present: bool = False
+    field_scalar: bool = False
+    field_value: str | int | float | None = dataclass_field(default=None, repr=False)
+
+    def __reduce__(self) -> NoReturn:
+        # A live snapshot can contain the exact value of a sensitive field.
+        # It is intentionally process-local and must never cross a pickle or
+        # other serialization boundary.
+        raise TypeError("Scoped exchanges cannot be serialized.")
+
+    def __reduce_ex__(self, protocol: SupportsIndex) -> NoReturn:
+        del protocol
+        raise TypeError("Scoped exchanges cannot be serialized.")
+
+    def __getstate__(self) -> NoReturn:
+        raise TypeError("Scoped exchanges cannot be serialized.")
 
 
 class _ResponseTooLarge(Exception):
@@ -253,23 +273,68 @@ def _object_ref(object_id: str) -> str:
     return "obj_" + hashlib.sha256(object_id.encode("utf-8")).hexdigest()
 
 
-def _parse_body(body: bytes, content_type: str, id_field: str) -> tuple[tuple[str, ...], str]:
+def _field_material(
+    value: Any, field_name: str
+) -> tuple[bool, bool, str | int | float | None]:
+    """Read only the requested top-level JSON field.
+
+    Nested values are deliberately ignored: selecting the first matching leaf
+    from an arbitrary response tree can snapshot an unrelated field.  The
+    scalar marker keeps a present ``null``/object/array distinguishable from a
+    supported scalar while keeping the redacted exchange contract bounded.
+    """
+
+    if not isinstance(value, Mapping) or field_name not in value:
+        return False, False, None
+    child = value[field_name]
+    if isinstance(child, str):
+        return True, True, child
+    if type(child) is int:
+        return True, True, child
+    if type(child) is float and math.isfinite(child):
+        return True, True, child
+    # bool, null, arrays, objects, and non-finite numbers are intentionally
+    # present-but-unsupported and must fail closed at the mutation boundary.
+    return True, False, None
+
+
+def _object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate JSON object keys rather than choosing one silently."""
+
+    result: dict[str, Any] = {}
+    for key, child in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object field")
+        result[key] = child
+    return result
+
+
+def _parse_body(
+    body: bytes, content_type: str, id_field: str
+) -> tuple[tuple[str, ...], str, bool, bool, str | int | float | None]:
     fingerprint = hashlib.sha256(body).hexdigest()
     if "json" not in content_type.lower():
-        return (), fingerprint
+        return (), fingerprint, False, False, None
     try:
-        decoded = json.loads(body.decode("utf-8"))
-    except (RecursionError, UnicodeDecodeError, json.JSONDecodeError):
-        return (), fingerprint
+        decoded = json.loads(body.decode("utf-8"), object_pairs_hook=_object_pairs)
+    except (RecursionError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return (), fingerprint, False, False, None
     try:
         canonical = _canonical_json(decoded).encode("utf-8")
     except (RecursionError, TypeError, ValueError):
-        return (), fingerprint
+        return (), fingerprint, False, False, None
     try:
         object_values = _object_values(decoded, id_field)
     except (RecursionError, TypeError, ValueError):
-        return (), fingerprint
-    return object_values, hashlib.sha256(canonical).hexdigest()
+        return (), fingerprint, False, False, None
+    field_present, field_scalar, field_value = _field_material(decoded, id_field)
+    return (
+        object_values,
+        hashlib.sha256(canonical).hexdigest(),
+        field_present,
+        field_scalar,
+        field_value,
+    )
 
 
 def _safe_body(value: bytes | str | Mapping[str, Any] | None) -> tuple[bytes | None, str | None]:
@@ -439,6 +504,13 @@ class ProbeExecutor:
             ),
             error_code=exchange.error_code,
             sent=exchange.sent,
+            field_present=(
+                exchange.response.field_present if exchange.response is not None else False
+            ),
+            field_scalar=(
+                exchange.response.field_scalar if exchange.response is not None else False
+            ),
+            field_value=(exchange.response.field_value if exchange.response is not None else None),
         )
 
     def _run_locked(self, target: ProbeTarget, mutation: MutationSpec | None) -> ProbeResult:
@@ -859,7 +931,13 @@ class ProbeExecutor:
                             raise _ResponseTooLarge
                     response_body = bytes(data)
                     content_type_header = response.headers.get("content-type", "")
-                    object_values, body_fingerprint = _parse_body(
+                    (
+                        object_values,
+                        body_fingerprint,
+                        field_present,
+                        field_scalar,
+                        field_value,
+                    ) = _parse_body(
                         response_body, content_type_header, id_field
                     )
                     return _Exchange(
@@ -868,6 +946,9 @@ class ProbeExecutor:
                             content_type=content_type_header.split(";", 1)[0].strip().lower(),
                             object_values=object_values,
                             body_fingerprint=body_fingerprint,
+                            field_present=field_present,
+                            field_scalar=field_scalar,
+                            field_value=field_value,
                         ),
                         redirect_target=response.headers.get("location"),
                         sent=True,

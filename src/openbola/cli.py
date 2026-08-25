@@ -14,6 +14,7 @@ from openbola import __version__
 from openbola.doctor import DiagnosticReport, run_doctor
 from openbola.mcp_server import MCPServiceError, create_mcp_server
 from openbola.pipeline import IdentityInput, PipelineError, PipelineResult, run_pipeline
+from openbola.recovery import RecoveryStatus, default_recovery_gate, recover_pending_mutation
 from openbola.reports import (
     ARTIFACT_FILENAMES,
     ReportError,
@@ -24,7 +25,11 @@ from openbola.scope import ScopeGuard
 from openbola.setup import SetupResult, run_setup
 from openbola.updates import UpdateResult, apply_update, check_for_update
 
-app = typer.Typer(add_completion=False, no_args_is_help=True)
+app = typer.Typer(
+    add_completion=False,
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
 console = Console()
 _SAFE_UPDATE_REASONS = frozenset(
     {
@@ -75,6 +80,27 @@ _SAFE_SETUP_REASONS = frozenset(
         "vault_unavailable",
     }
 )
+_SAFE_RECOVERY_REASONS = frozenset(
+    {
+        "credential_missing",
+        "grant_changed",
+        "grant_missing",
+        "journal_present",
+        "journal_tampered",
+        "recovery_blocked",
+        "recovery_clear",
+        "restore_unverified",
+        "scope_changed",
+    }
+)
+
+
+def launch_tui() -> None:
+    """Lazy no-argument UI entry point, kept injectable for CLI tests."""
+
+    from openbola.tui import launch_tui as _launch_tui
+
+    _launch_tui()
 
 
 @dataclass(frozen=True)
@@ -177,6 +203,23 @@ def _emit_doctor_result(result: DiagnosticReport, *, json_output: bool) -> None:
         raise typer.Exit(code=2)
 
 
+def _emit_recovery_result(result: RecoveryStatus, *, json_output: bool) -> None:
+    """Render the explicit recovery protocol without exposing journal data."""
+
+    ok = result.state == "clear"
+    details: dict[str, object] = {"ok": ok, "status": result.state}
+    if result.reason_code in _SAFE_RECOVERY_REASONS:
+        details["reason_code"] = result.reason_code
+    if json_output:
+        typer.echo(json.dumps(details, sort_keys=True, separators=(",", ":")))
+    elif ok:
+        console.print("[green]OpenBOLA recovery voltooid[/green]")
+    else:
+        console.print("[bold red]recovery geweigerd[/bold red]")
+    if not ok:
+        raise typer.Exit(code=2)
+
+
 def _version_callback(value: bool) -> None:
     if value:
         typer.echo(__version__)
@@ -256,6 +299,9 @@ def scan(
         inputs = [_identity_input(name, path, credentials[name]) for name, path in traffic.items()]
         if not json_output:
             console.print(f"[cyan]>[/cyan] scope laden vanaf {scope}")
+        recovery = default_recovery_gate()
+        if recovery.status().state != "clear":
+            raise PipelineError("recovery_blocked")
         result = run_pipeline(
             scope.absolute(),
             base_url,
@@ -302,6 +348,23 @@ def doctor_command(
         del error
         _emit_command_error("diagnostics_blocked", json_output=json_output)
     _emit_doctor_result(result, json_output=json_output)
+
+
+@app.command("recover")
+def recover_command(
+    scope: Annotated[Path, typer.Option("--scope", exists=False, readable=True)],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Explicitly restore a pending mutation using a confirmed scope file."""
+
+    try:
+        result = recover_pending_mutation(scope)
+    except Exception as error:
+        # Journal, keychain, scope, and transport details are never part of
+        # the command protocol.  Recovery remains fail-closed and explicit.
+        del error
+        _emit_command_error("recovery_failed", json_output=json_output)
+    _emit_recovery_result(result, json_output=json_output)
 
 
 @app.command("report")
@@ -412,8 +475,9 @@ def mcp_command(
         _emit_command_error("mcp_unavailable", json_output=json_output)
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     version: Annotated[
         bool,
         typer.Option("--version", callback=_version_callback, is_eager=True),
@@ -421,7 +485,12 @@ def main(
 ) -> None:
     """OpenBOLA: authorization-first BOLA/IDOR testing."""
 
-    del version
+    if version or ctx.invoked_subcommand is not None:
+        return
+    # Keep Textual out of headless command startup.  This also makes the
+    # no-argument entry point easy to replace in tests without importing the
+    # terminal UI at module import time.
+    launch_tui()
 
 
 if __name__ == "__main__":  # pragma: no cover

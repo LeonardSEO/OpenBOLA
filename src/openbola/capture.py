@@ -127,7 +127,7 @@ class LoginRecipe:
         if not self.name.strip():
             raise CaptureError("LoginRecipe name must not be empty")
         try:
-            _validate_target_url(self.start_url)
+            _validate_target_url(self.start_url, allow_query=True)
         except CaptureError as exc:
             raise CaptureError("LoginRecipe start_url is unsafe") from exc
         for field_name in ("username_selector", "password_selector", "submit_selector"):
@@ -683,6 +683,8 @@ async def capture_har(
         raise CaptureError("scope_guard must be a ScopeGuard")
     if config.login_recipe is not None and registry is None:
         raise CaptureError("registry is required when config.login_recipe is set")
+    if config.login_recipe is not None and not isinstance(registry, SessionValueStore):
+        raise CaptureError("registry must be a SessionValueStore")
     active_collector = collector or InMemoryEventCollector()
     entries, _ = await _run_scoped_capture(
         config,
@@ -868,14 +870,14 @@ def parse_har_records(
     return [_entry_to_record(entry, identity) for entry in entries]
 
 
-def _validate_target_url(url: str) -> None:
+def _validate_target_url(url: str, *, allow_query: bool = False) -> None:
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise CaptureError("target_url must be an absolute HTTP(S) URL")
     if parsed.username is not None or parsed.password is not None:
         raise CaptureError("target_url must not contain credentials")
-    if parsed.query or parsed.fragment:
-        raise CaptureError("target_url must not contain query parameters or fragments")
+    if (parsed.query and not allow_query) or parsed.fragment:
+        raise CaptureError("target_url contains disallowed query parameters or fragments")
 
 
 def _validated_output_path(root: Path, relative: Path) -> Path:

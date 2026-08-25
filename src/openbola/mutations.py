@@ -10,6 +10,8 @@ the candidate and are never copied into error messages or serialized metadata.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -316,6 +318,17 @@ class MutationSweepExecutor:
         if registry is None or not hasattr(registry, "resolve_value"):
             raise TypeError("sweep requires an in-memory value registry")
         active_journal = journal if journal is not None else self.journal
+        if active_journal is None:
+            return tuple(
+                MutationOutcome(
+                    candidate.record_handle,
+                    "skipped",
+                    False,
+                    False,
+                    "journal_required",
+                )
+                for candidate in plan.candidates
+            )
 
         outcomes: list[MutationOutcome] = []
         blocked = False
@@ -336,6 +349,7 @@ class MutationSweepExecutor:
                 active_executor,
                 registry,
                 active_journal,
+                plan.scope_digest,
             )
             outcomes.append(outcome)
             blocked = must_stop
@@ -372,33 +386,30 @@ class MutationSweepExecutor:
             raise MutationPreflightError("mutation restore body exceeds the safety limit")
         return encoded
 
-    @staticmethod
     def _journal_commit(
+        self,
         journal: Any | None,
         candidate: MutationCandidate,
         snapshot: ScopedExchange,
+        snapshot_value: str | int | float,
+        scope_digest: str,
     ) -> None:
         if journal is None:
             return
-        # Task 3 supplies the concrete encrypted journal.  Keep this adapter
-        # deliberately metadata-only so an older/no-op journal cannot receive
-        # the raw object id or original value.
+        # The concrete P6 journal receives the exact live snapshot value only
+        # after the snapshot has succeeded and encrypts it before persistence.
         commit = getattr(journal, "commit", None)
         if commit is None:
             commit = getattr(journal, "begin", None)
         if commit is None:
             raise RuntimeError("mutation journal does not provide a commit operation")
-        try:
-            commit(
-                record_handle=candidate.record_handle,
-                endpoint_handle=candidate.endpoint_handle,
-                field=candidate.field,
-                snapshot_fingerprint=snapshot.body_fingerprint,
-            )
-        except TypeError:
-            # A typed Task 3 implementation may accept a single journal
-            # record object instead; the caller owns that adaptation.
-            commit(candidate.record_handle, snapshot.body_fingerprint)
+        commit(
+            candidate=candidate,
+            original_value=snapshot_value,
+            scope_digest=scope_digest,
+            snapshot_fingerprint=snapshot.body_fingerprint,
+            grant_fingerprint=_grant_fingerprint(self.scope_guard.config.mutation_grants),
+        )
 
     def _run_candidate(
         self,
@@ -406,6 +417,7 @@ class MutationSweepExecutor:
         executor: ProbeExecutor,
         registry: Any,
         journal: Any | None,
+        scope_digest: str,
     ) -> tuple[MutationOutcome, bool]:
         target = candidate.target
         operation = candidate.mutation
@@ -426,7 +438,14 @@ class MutationSweepExecutor:
             body=None,
             **snapshot_kwargs,
         )
-        if not self._successful(snapshot) or not snapshot.object_values:
+        if (
+            not self._successful(snapshot)
+            or not snapshot.field_present
+            or not snapshot.field_scalar
+            or snapshot.field_value is None
+            or isinstance(snapshot.field_value, bool)
+            or type(snapshot.field_value) not in {str, int, float}
+        ):
             return (
                 MutationOutcome(
                     candidate.record_handle,
@@ -437,8 +456,9 @@ class MutationSweepExecutor:
                 ),
                 False,
             )
+        snapshot_value = snapshot.field_value
         try:
-            self._journal_commit(journal, candidate, snapshot)
+            self._journal_commit(journal, candidate, snapshot, snapshot_value, scope_digest)
         except BaseException:
             return (
                 MutationOutcome(
@@ -490,11 +510,10 @@ class MutationSweepExecutor:
         restore_verified = False
         restore_error: str | None = None
         try:
-            original = registry.resolve_value(candidate.original_value)
             restore = executor.request_scoped(
                 target,
                 target.owner_credential,
-                body=self._body(candidate.field, original),
+                body=self._body(candidate.field, snapshot_value),
                 method=operation.method,
                 **request_kwargs,
             )
@@ -509,9 +528,12 @@ class MutationSweepExecutor:
                         method="GET",
                         **request_kwargs,
                     )
-                    restore_verified = self._successful(verification) and str(
-                        original
-                    ) in verification.object_values
+                    restore_verified = (
+                        self._successful(verification)
+                        and verification.field_present
+                        and verification.field_value == snapshot_value
+                        and type(verification.field_value) is type(snapshot_value)
+                    )
                 except BaseException:
                     restore_verified = False
                 if not restore_verified:
@@ -527,6 +549,21 @@ class MutationSweepExecutor:
                     mutation_verified,
                     False,
                     restore_error,
+                ),
+                True,
+            )
+        try:
+            clear = getattr(journal, "clear", None)
+            if callable(clear):
+                clear()
+        except BaseException:
+            return (
+                MutationOutcome(
+                    candidate.record_handle,
+                    "inconclusive",
+                    mutation_verified,
+                    False,
+                    "cleanup_unverified",
                 ),
                 True,
             )
@@ -560,6 +597,26 @@ def _normalise_source(
     if not isinstance(source, Sequence) or isinstance(source, (str, bytes, bytearray)):
         raise MutationPreflightError("mutation candidates must be a sequence")
     return source, marker
+
+
+def _grant_fingerprint(grants: Sequence[MutationGrant]) -> str:
+    """Stable opaque provenance for the confirmed mutation-grant set."""
+
+    encoded: list[dict[str, Any]] = []
+    for grant in grants:
+        encoded.append(
+            {
+                "methods": sorted(grant.methods),
+                "paths": sorted((str(rule.kind), rule.pattern) for rule in grant.path_rules),
+                "fields": sorted(grant.allowed_fields),
+                "scope": grant.record_scope.value,
+                "max_records": grant.max_records,
+                "max_requests": grant.max_requests,
+                "canary": grant.allow_canary_create_delete,
+            }
+        )
+    payload = json.dumps(encoded, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _select_grant(
