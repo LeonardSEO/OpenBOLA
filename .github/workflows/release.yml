@@ -63,7 +63,7 @@ jobs:
             --project-root . --target '${{ matrix.target }}' --version "$VERSION" \
             --tag "$GITHUB_REF_NAME" --executable '${{ matrix.executable }}' --output-dir release
       - name: Attest release archive
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
           subject-path: release/openbola-*.${{ matrix.target == 'windows-x64' && 'zip' || 'tar.gz' }}
       - name: Upload native archive
