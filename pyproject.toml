@@ -29,7 +29,7 @@ dependencies = [
   "pydantic>=2.8,<3",
   "pyyaml>=6,<7",
   "rich>=13,<16",
-  "textual>=0.70,<1",
+  "textual>=0.70,<9",
   "typer>=0.12,<1",
 ]
 
