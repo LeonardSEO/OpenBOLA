@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from test_mutations import _candidate, _guard
+from test_mutations import NOW, _candidate, _guard
 
 from openbola.mutations import MutationPreflightError, MutationSweepExecutor, preflight_sweep
 from openbola.recovery import AESGCMJournal
@@ -35,6 +35,6 @@ def test_encrypted_journal_is_cleared_after_verified_sweep(tmp_path: Path) -> No
 def test_mutation_sweep_preflight_does_not_dispatch_or_write_journal(tmp_path: Path) -> None:
     guard = _guard(tmp_path, record_scope="explicit")
     executor = MutationSweepExecutor(guard)
-    plan = executor.preflight((_candidate(),))
+    plan = executor.preflight((_candidate(),), now=NOW)
     assert plan.request_count == 5
     assert not (tmp_path / "recovery.journal").exists()

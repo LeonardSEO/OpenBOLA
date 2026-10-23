@@ -29,7 +29,7 @@ def _published(root: Path, *, run_id: int = 7) -> Path:
     directory = root / "runs" / str(run_id)
     _private(directory.parent)
     write_reports(_bundle(), output_dir=directory)
-    write_run_manifest(directory, run_id=run_id, created_at="2026-08-24T12:00:00+00:00")
+    write_run_manifest(directory, run_id=run_id)
     return directory
 
 
@@ -69,7 +69,7 @@ def test_loader_rejects_missing_manifest_partial_bundle_and_schema(tmp_path: Pat
         load_published_report(directory)
     assert missing.value.code == "path_not_found"
 
-    write_run_manifest(directory, run_id=7, created_at="2026-08-24T12:00:00+00:00")
+    write_run_manifest(directory, run_id=7)
     (directory / "report.csv").unlink()
     with pytest.raises(ReportError) as partial:
         load_published_report(directory)
@@ -123,7 +123,7 @@ def test_loader_rejects_unknown_nested_fields_and_non_private_ancestor(
     nested.chmod(0o755)
     directory = nested / "run"
     write_reports(_bundle(), output_dir=directory)
-    write_run_manifest(directory, run_id=7, created_at="2026-08-24T12:00:00+00:00")
+    write_run_manifest(directory, run_id=7)
     with pytest.raises(ReportError) as private:
         ReportLocator().resolve(
             "nested/run", db_path=_db(tmp_path / "state.db", run_id=7), data_root=root
@@ -193,7 +193,7 @@ def test_manifest_publication_is_no_replace_and_cleans_stage(tmp_path: Path) -> 
     root = _private(tmp_path / "data")
     directory = _published(root)
     with pytest.raises(ReportError) as duplicate:
-        write_run_manifest(directory, run_id=7, created_at="2026-08-24T12:00:00+00:00")
+        write_run_manifest(directory, run_id=7)
     assert duplicate.value.code == "manifest_exists"
     assert not (directory / ".manifest.json.stage").exists()
 
