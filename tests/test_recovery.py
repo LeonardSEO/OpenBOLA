@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
-from test_mutations import _candidate, _guard
+from test_mutations import NOW, _candidate, _guard
 
 from openbola.credentials import CredentialVault
 from openbola.executor import ScopedExchange
@@ -234,6 +234,7 @@ def test_recovery_verification_is_type_exact_and_rejects_unsupported(
         guard,
         grant=grant,
         target=candidate.target,
+        now=NOW,
     ).recover()
     assert status.state == "required"
     assert not journal.cleared
