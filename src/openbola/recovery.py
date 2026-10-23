@@ -612,7 +612,9 @@ class RecoveryCoordinator:
                 or not self.grant.permits(record.method, concrete_path)
             ):
                 return RecoveryStatus("blocked", True, "grant_changed")
-            guard.require_allowed(target.base_url.rstrip("/") + concrete_path, record.method)
+            guard.require_allowed(
+                target.base_url.rstrip("/") + concrete_path, record.method, now=self._clock()
+            )
             body = json.dumps({record.field: record.original_value}, separators=(",", ":"))
             restore = self.executor.request_scoped(
                 target,

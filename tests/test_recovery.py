@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -206,8 +207,11 @@ class _RecoveryExecutor:
         ScopedExchange(200, "f" * 64, (), field_present=True, field_scalar=False, field_value=None),
     ],
 )
+@pytest.mark.parametrize(
+    "clock,expected_state", [(NOW, "required"), (NOW + timedelta(days=8), "blocked")]
+)
 def test_recovery_verification_is_type_exact_and_rejects_unsupported(
-    tmp_path: Path, verification: ScopedExchange
+    tmp_path: Path, verification: ScopedExchange, clock: datetime, expected_state: str
 ) -> None:
     guard = _guard(tmp_path, record_scope="explicit")
     candidate = _candidate()
@@ -234,9 +238,9 @@ def test_recovery_verification_is_type_exact_and_rejects_unsupported(
         guard,
         grant=grant,
         target=candidate.target,
-        now=NOW,
+        now=clock,
     ).recover()
-    assert status.state == "required"
+    assert status.state == expected_state
     assert not journal.cleared
 
 
